@@ -86,8 +86,7 @@ void nrf24_init()
 void nrf24_begin_tx()
 {
 	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP));
-	//delay(50);
-	delay(5);
+	delay(10);
 }
 void nrf24_begin_rx()
 {
