@@ -1,0 +1,1 @@
+c:\dev\pyupdi\pyupdi.py -d tiny1614 -c COM5 -e -fs 0:0x00 -fs 1:0x0 -fs 2:0x02 -fs 4:0x00 -fs 5:0xC5 -fs 6:0x03 -fs 7:0x00 -fs 8:0x00 -f release\STK500NRF24.hex
