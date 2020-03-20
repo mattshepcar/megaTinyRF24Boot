@@ -7,6 +7,7 @@ static const uint16_t VERSION = 0x900;
 
 struct nrfPacket
 {
+#if !REVERSED_PACKETS
 	uint8_t magic0, magic1;
 	uint8_t cmd;
 	uint8_t addresslo;
@@ -16,9 +17,22 @@ struct nrfPacket
 		uint8_t numpackets;
 		uint8_t eepromvalue;
 	};
+#else
 	uint8_t pad[26];
+	union
+	{
+		uint8_t numpackets;
+		uint8_t eepromvalue;
+	};
+	uint8_t addresshi;
+	uint8_t addresslo;
+	uint8_t cmd;
+	uint8_t magic1, magic0;
+#endif
+	nrfPacket() : magic0(0x88), magic1(0x99) {}
 };
-nrfPacket packet = { 0x99, 0x88 };
+nrfPacket packet;
+
 
 uint8_t nrf24_status();
 uint8_t nrf24_command(uint8_t cmd, uint8_t data = NOP);
@@ -70,15 +84,13 @@ void nrf24_init()
 	digitalWrite(PIN_PB0, HIGH);
 	delay(5);
 	nrf24_write_register(CONFIG, 0);
-	//nrf24_write_register(NRF_STATUS, 0xFF);
 	nrf24_write_register(EN_AA, 0x3F);
 	nrf24_write_register(SETUP_AW, 1);
 	nrf24_write_register(RF_CH, 76);
 	nrf24_write_register(SETUP_RETR, 0x7F);
 	nrf24_write_register(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | (1 << RF_DR_HIGH));
-	//nrf24_write_register(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH));
-	nrf24_write_register(DYNPD, 0);
-	nrf24_write_register(FEATURE, 0);
+	nrf24_write_register(FEATURE, (1 << EN_DPL));
+	nrf24_write_register(DYNPD, 1);
 	nrf24_write_register(EN_RXADDR, 1);
 	nrf24_command(FLUSH_TX);
 	nrf24_command(FLUSH_RX);
@@ -169,9 +181,6 @@ void OpenUart()
 {
 	gMode = MODE_UART;
 	nrf24_write_register(CONFIG, 0);
-	//delay(5);
-	nrf24_write_register(FEATURE, (1 << EN_DPL));
-	nrf24_write_register(DYNPD, 1);
 	nrf24_set_tx_address(uartAddress);
 	nrf24_begin_rx();
 	serialbufpos = 0;
@@ -180,14 +189,11 @@ void OpenUart()
 uint8_t OpenStk500()
 {
 	nrf24_write_register(CONFIG, 0);
-	//delay(50);
-	nrf24_write_register(FEATURE, 0);
-	nrf24_write_register(DYNPD, 0);
 	nrf24_set_tx_address(progAddress);
 	nrf24_begin_tx();
 
 	packet.cmd = 'F';
-	packet.addresshi = 0x34; // SRAM
+	packet.addresshi = 0x35; // SRAM
 	packet.addresslo = 0x00;
 	packet.numpackets = 0x00;
 	// wait for 4 sync packets to be received.  Up to 3 can fit in
@@ -197,7 +203,7 @@ uint8_t OpenStk500()
 	uint8_t successes = 0;
 	for(;;)
 	{
-		if (nrf24_tx(&packet, 32) && nrf24_tx_end())
+		if (nrf24_tx(&packet, sizeof(packet)) && nrf24_tx_end())
 		{
 			if (++successes == 4)
 				break;
@@ -327,10 +333,10 @@ void HandleStk500()
 		if (!verifySpace())
 			return;
 		packet.cmd = 'F';
-		packet.addresshi = 0x34; // SRAM
+		packet.addresshi = 0x35; // SRAM
 		packet.addresslo = 0x00;
 		packet.numpackets = 0x00;
-		if (!nrf24_tx(&packet, 32) || !nrf24_tx_end())
+		if (!nrf24_tx(&packet, sizeof(packet)) || !nrf24_tx_end())
 			failed = true;
 		break;
 	}
@@ -411,25 +417,30 @@ void HandleStk500()
 		{
 			packet.cmd = 'F';
 			packet.addresshi += 0x80;
-			while (length > 0)
+			
+			if (length <= 64)
 			{
+				char packetbuf[64];
 				packet.numpackets = (length + 31) / 32;
-				if (!failed && !nrf24_tx(&packet, 32))
+#if !REVERSED_PACKETS
+				for (uint8_t i = 0; i < length; ++i)
+					packetbuf[i] = getch();
+#else
+				uint8_t n = packet.numpackets * 32;
+				for (uint16_t i = 0; i < n; ++i)
+					packetbuf[n - 1 - i] = getch();
+				packet.addresslo += n;
+				if (packet.addresslo < n)
+					++packet.addresshi;
+#endif
+				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
 					failed = true;
-				for (uint8_t i = 0; i < packet.numpackets; ++i)
-				{
-					uint8_t j = 0;
-					for (; j < 32 && length > 0; ++j, --length)
-						tmp[j] = getch();
-					for (; j < 32; ++j)
-						tmp[j] = 0;
-					if (!failed && !nrf24_tx(tmp, 32))
+				for (uint8_t i = 0; i < 64; i += 32)
+					if (!failed && !nrf24_tx(&packetbuf[i], 32))
 						failed = true;
-				}
-				packet.addresslo += 64;
-				if (packet.addresslo < 64)
-					++packet.addresshi;				
 			}
+			else
+				failed = true;
 		}
 		else
 		{
@@ -438,7 +449,7 @@ void HandleStk500()
 			while (length--)
 			{
 				packet.eepromvalue = getch();
-				if (!failed && !nrf24_tx(&packet, 32))
+				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
 					failed = true;
 				++packet.addresslo;
 			}
@@ -480,7 +491,7 @@ void HandleStk500()
 		if (!verifySpace())
 			return;
 		packet.cmd = 'R';
-		if (!nrf24_tx(&packet, 32) || !nrf24_tx_end())
+		if (!nrf24_tx(&packet, sizeof(packet)) || !nrf24_tx_end())
 			failed = true;
 		
 		finished = true;
@@ -572,19 +583,19 @@ void HandleConfigure()
 			{
 				packet.addresslo = i;
 				packet.eepromvalue = serialbuf[i + 6];
-				if (!failed && !nrf24_tx(&packet, 32))
+				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
 					failed = true;
 			}
 			// exit from the bootloader
 			packet.cmd = 'R'; 
-			if (!failed && !nrf24_tx(&packet, 32)) 
+			if (!failed && !nrf24_tx(&packet, sizeof(packet)))
 				failed = true;
 			// trigger a reset back into the bootloader to reconfigure the radio address
 			packet.cmd = 'F';
-			packet.addresshi = 0x34;
+			packet.addresshi = 0x35;
 			packet.addresslo = 0x00;
 			packet.numpackets = 0x00;
-			if (!failed && nrf24_tx(&packet, 32) && nrf24_tx_end())
+			if (!failed && nrf24_tx(&packet, sizeof(packet)) && nrf24_tx_end())
 			{
 				// address updated successfully
 				uartAddress[1] = progAddress[1] = serialbuf[7];

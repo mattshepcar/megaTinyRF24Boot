@@ -4,24 +4,32 @@
 ; Created: 15/03/2020 14:50:27
 ; Author : Matt Shepcar
 ;
-    
+        
 #include <avr/io.h>
 #include "nRF24L01.h"
 
 ; PIN configuration settings:
 
-CSN_PORT_DIR = VPORTB_DIR
-CSN_PORT_OUT = VPORTB_OUT
-CSN_PIN = 0
+#define CSN_PORT_DIR VPORTB_DIR
+#define CSN_PORT_OUT VPORTB_OUT
+#define CSN_PIN 0
 
-CE_PORT_DIR = VPORTB_DIR
-CE_PORT_OUT = VPORTB_OUT
-CE_PIN = 0
+; define these if CE is connected to MCU
+#define CE_PORT_DIR VPORTB_DIR
+#define CE_PORT_OUT VPORTB_OUT
+#define CE_PIN 0
 
-LED_PORT_DIR = VPORTB_DIR
-LED_PORT_OUT = VPORTB_OUT
-LED_PIN = 1
+; define to turn LED on at boot
+#define LED_PORT_DIR VPORTB_DIR
+#define LED_PORT_OUT VPORTB_OUT
+#define LED_PIN 1
 
+; define to skip 1 second power-up delay if there's no radio chip connected
+#define CHECK_RADIO 1
+
+; check that command packets start with 0x8899 signature
+#define CHECK_COMMAND_SIGNATURES 1
+ 
 #define SPI0_base 0x800  
 #define SPI_CTRLA_offset (SPI0_CTRLA - SPI0_base)
 #define SPI_CTRLB_offset (SPI0_CTRLB - SPI0_base)
@@ -39,34 +47,39 @@ LED_PIN = 1
     .org 0
    .global main
 
-; vectors for the application to use to access the radio/SPI functions
-
-main:		    	rjmp    start_bootloader
-vec_nrf24_status:   rjmp    nrf24_status
-vec_nrf24_command:  rjmp    nrf24_command
-vec_nrf24_begin:    rjmp    nrf24_begin
-vec_spi_transfer:   rjmp    spi_transfer
-vec_nrf24_end:	    rjmp    nrf24_end
+; vectors for the application to use to access the radio functions
+main:
+    rjmp    start_bootloader
+vec_nrf24_status:
+    rjmp    nrf24_status
+vec_nrf24_command:
+    rjmp    nrf24_command
+vec_nrf24_transfer:
+    rjmp    nrf24_begin
 vec_poll_reset: 
-	; resets into bootloader when a programming packet is received
+    ; reset into bootloader when a programming packet is received
     rcall   nrf24_status
     andi    r24, 0xE
     cpi	    r24, 0xA ; packet in pipe 5?
-    brne    vec_nrf24_end
+    brne    vec_nrf24_status
     ldi	    r24, CPU_CCP_IOREG_gc
     out	    CPU_CCP, r24
     sts	    RSTCTRL_SWRR, r25
     
-start_bootloader: 
+start_bootloader:   
     ; set radio CSN and CE pins high
     sbi	    CSN_PORT_DIR, CSN_PIN
     sbi	    CSN_PORT_OUT, CSN_PIN
+#ifdef CE_PIN 
     sbi	    CE_PORT_DIR, CE_PIN
     sbi	    CE_PORT_OUT, CE_PIN
+#endif
 
+#ifdef LED_PIN
     ; turn LED on
     sbi	    LED_PORT_DIR, LED_PIN
     sbi	    LED_PORT_OUT, LED_PIN    
+#endif
 
     ; initialise SPI pins
     sbi	    VPORTA_DIR, 1
@@ -84,11 +97,13 @@ init_radio:
     ldi	    r25, CPU_CCP_IOREG_gc
     out	    CPU_CCP, r25
     sts	    WDT_CTRLA, ZH ; watchdog = 1s
-    
+
+#if CHECK_RADIO
     ; last command in radio_registers reads back the RF_SETUP register.
     ; here we verify it to check if radio is available and if not just run the app
     cpi	    r24, SETUP_VALUE
     brne    jump_to_app
+#endif
     
     ; set radio addresses from user signature area
     ldi	    r24, W_REGISTER | TX_ADDR
@@ -114,14 +129,13 @@ wait_for_command:
 
 wait_for_packet:
     rcall   nrf24_status
-    andi    r24, 0xE ; RX FIFO status
-    cpi	    r24, 0xE ; 0xE = empty
-    breq    wait_for_packet
+    subi    r24, 0xE 
+    brhc    wait_for_packet ; low nybble less than 0xE?
 
-	; got a packet, reset watchdog
+    ; got a packet, reset watchdog
     wdr 	
 
-	; read fixed payload size of 32 bytes
+    ; read fixed payload size of 32 bytes
     ldi	    r24, R_RX_PAYLOAD
     rcall   nrf24_begin
     ldi	    r16, 32
@@ -138,10 +152,17 @@ read_packet:
 
 read_command:
     sbiw    Y, 32
-    ldd	    r23, Y+5 ; number of packets (or single byte data)
-    ldd     r24, Y+2
-    ldd	    r25, Y+3
-    ldd     YH, Y+4  ; address to program
+#if CHECK_COMMAND_SIGNATURES
+    ld	    r24, Y
+    subi    r24, 0x88
+    ldd	    r24, Y + 1
+    sbci    r24, 0x99
+    brne    wait_for_command
+#endif
+    ldd	    r23, Y + 5 ; number of packets (or single byte data)
+    ldd     r24, Y + 2
+    ldd	    r25, Y + 3
+    ldd     YH, Y + 4  ; address to program
     mov	    YL, r25
     cpi	    r24, 'F' ; flash
     breq    wait_for_packet
@@ -187,7 +208,6 @@ nrf24_command:
     rcall   nrf24_begin
     mov	    r24, r22
     rcall   spi_transfer
-nrf24_end:    
     sbi	    CSN_PORT_OUT, CSN_PIN
     ret
   
@@ -211,22 +231,16 @@ radio_registers:
     .byte W_REGISTER | SETUP_AW, 1 ; address field width = 3 bytes
     .byte W_REGISTER | RF_CH, 76 ; channel 76
     .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; high power, high data rate
-    .byte W_REGISTER | DYNPD, 0x1F ; disable dynamic payload length on pipe 5
-    .byte W_REGISTER | RX_PW_P5, 32 ; fixed payload of 32 bytes
+    .byte W_REGISTER | DYNPD, 0x3F ; dynamic payload on all pipes
     .byte W_REGISTER | EN_RXADDR, (1 << 5) ; enable rx5 pipe
     .byte W_REGISTER | RX_ADDR_P5, 'P' ; programming pipe address
     .byte W_REGISTER | FEATURE, (1 << EN_DPL) ; dynamic payloads
     .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
+#if CHECK_RADIO
     .byte R_REGISTER | RF_SETUP, 0 ; read back setup register to check radio is present
+#endif
 radio_registers_end: ; power up command:
     .byte W_REGISTER | CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP) | (1 << PRIM_RX)
-
-; a few ways to reclaim some more bytes:
-;  - combine register setting for SPI, CSN & CE
-;  - get rid of radio existence check (3 words)
-;  - get rid of LED (2 words)
-;  - store packets backwards and use st -Y to remove sbiw Y,32 (1 word)
-;  - remove jump table (6 words)
 
     .org 0x100
 app:
