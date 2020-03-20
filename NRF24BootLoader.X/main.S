@@ -7,27 +7,25 @@
         
 #include <avr/io.h>
 #include "nRF24L01.h"
-
+  
 ; PIN configuration settings:
-
-#define CSN_PORT_DIR VPORTB_DIR
-#define CSN_PORT_OUT VPORTB_OUT
+#define CSN_PORT VPORTB_OUT
 #define CSN_PIN 0
-
-; define these if CE is connected to MCU
-#define CE_PORT_DIR VPORTB_DIR
-#define CE_PORT_OUT VPORTB_OUT
-#define CE_PIN 0
-
-; define to turn LED on at boot
-#define LED_PORT_DIR VPORTB_DIR
-#define LED_PORT_OUT VPORTB_OUT
+#define CE_PORT VPORTB_OUT
+#define CE_PIN 0 
+#define LED_PORT VPORTB_OUT
 #define LED_PIN 1
+#define MOSI_PIN 1
+#define SCK_PIN 3
+; make sure to update these with the right pins on the right ports:
+#define PORTA_DIR_CFG _BV(MOSI_PIN) | _BV(SCK_PIN)
+#define PORTB_DIR_CFG _BV(CSN_PIN) | _BV(CE_PIN) | _BV(LED_PIN)
 
 ; define to skip 1 second power-up delay if there's no radio chip connected
 #define CHECK_RADIO 1
 
 ; check that command packets start with 0x8899 signature
+; (not strictly needed as only programming packets should go to this port)
 #define CHECK_COMMAND_SIGNATURES 1
  
 #define SPI0_base 0x800  
@@ -56,35 +54,40 @@ vec_nrf24_command:
     rjmp    nrf24_command
 vec_nrf24_transfer:
     rjmp    nrf24_begin
+vec_nrf24_read_rx_payload:
+    rjmp    nrf24_read_rx_payload
 vec_poll_reset: 
     ; reset into bootloader when a programming packet is received
     rcall   nrf24_status
     andi    r24, 0xE
     cpi	    r24, 0xA ; packet in pipe 5?
-    brne    vec_nrf24_status
+    brne    return
     ldi	    r24, CPU_CCP_IOREG_gc
     out	    CPU_CCP, r24
     sts	    RSTCTRL_SWRR, r25
+
+nrf24_read_rx_payload:
+    movw    X, r24
+nrf24_read_rx_payload_to_x:
+    ldi	    r24, R_RX_PAYLOAD
+    rcall   nrf24_begin
+read_packet:
+    rcall   spi_transfer
+    st	    X+, r24
+    dec	    r22
+    brne    read_packet
+return:
+    rjmp    nrf24_end
     
 start_bootloader:   
-    ; set radio CSN and CE pins high
-    sbi	    CSN_PORT_DIR, CSN_PIN
-    sbi	    CSN_PORT_OUT, CSN_PIN
-#ifdef CE_PIN 
-    sbi	    CE_PORT_DIR, CE_PIN
-    sbi	    CE_PORT_OUT, CE_PIN
-#endif
-
-#ifdef LED_PIN
-    ; turn LED on
-    sbi	    LED_PORT_DIR, LED_PIN
-    sbi	    LED_PORT_OUT, LED_PIN    
-#endif
-
-    ; initialise SPI pins
-    sbi	    VPORTA_DIR, 1
-    sbi	    VPORTA_DIR, 3
-
+    ; configure pin dirs and set CE, CSN & LED high
+    ldi	    r24, PORTA_DIR_CFG
+    out	    VPORTA_DIR, r24
+    ;out	    VPORTA_OUT, r24
+    ldi	    r24, PORTB_DIR_CFG
+    out	    VPORTB_DIR, r24
+    out	    VPORTB_OUT, r24
+   
     ; initialise radio registers
     ldi	    YL, lo8(radio_registers+MAPPED_PROGMEM_START)
     ldi	    YH, hi8(radio_registers+MAPPED_PROGMEM_START)
@@ -124,9 +127,13 @@ jump_to_app:
     rjmp    app
    
 wait_for_command:
-    ldi     YH, hi8(INTERNAL_SRAM_START) ; packet buffer
+    ldi     XH, hi8(INTERNAL_SRAM_START) ; packet buffer
     ldi	    r23, 0 ; packets left in page (0 = awaiting new command)
-
+    
+read_page:
+    ; save start address in Y
+    movw    Y, X
+    
 wait_for_packet:
     rcall   nrf24_status
     subi    r24, 0xE 
@@ -136,22 +143,14 @@ wait_for_packet:
     wdr 	
 
     ; read fixed payload size of 32 bytes
-    ldi	    r24, R_RX_PAYLOAD
-    rcall   nrf24_begin
-    ldi	    r16, 32
-read_packet:
-    rcall   spi_transfer
-    st	    Y+, r24
-    dec	    r16
-    brne    read_packet
-    sbi	    CSN_PORT_OUT, CSN_PIN
+    ldi	    r22, 32
+    rcall   nrf24_read_rx_payload_to_x
 
     subi    r23, 1
     breq    write_page
     brcc    wait_for_packet
 
 read_command:
-    sbiw    Y, 32
 #if CHECK_COMMAND_SIGNATURES
     ld	    r24, Y
     subi    r24, 0x88
@@ -159,22 +158,21 @@ read_command:
     sbci    r24, 0x99
     brne    wait_for_command
 #endif
+    ldd     r24, Y + 2 ; command
+    ldd	    XL, Y + 3 ; address to program
+    ldd     XH, Y + 4  
     ldd	    r23, Y + 5 ; number of packets (or single byte data)
-    ldd     r24, Y + 2
-    ldd	    r25, Y + 3
-    ldd     YH, Y + 4  ; address to program
-    mov	    YL, r25
     cpi	    r24, 'F' ; flash
-    breq    wait_for_packet
+    breq    read_page
     brcc    jump_to_app
 
 write_byte:
-    st      Y, r23
+    st      X, r23
 write_page:
     ldi	    ZH, hi8(NVMCTRL_CTRLA) ; ZL = 0 from SPI0_base
     ldi     r24, NVMCTRL_CMD_PAGEERASEWRITE_gc
-    ldi	    r16, CPU_CCP_SPM_gc
-    out	    CPU_CCP, r16
+    ldi	    r25, CPU_CCP_SPM_gc
+    out	    CPU_CCP, r25
     st	    Z, r24
 wait_nvm:
     ldd	    r24, Z + (NVMCTRL_STATUS - NVMCTRL_CTRLA)
@@ -185,14 +183,14 @@ wait_nvm:
 spi_transfer_from_x:
     ld      r24, X+
 nrf24_begin:
-    cbi	    CSN_PORT_OUT, CSN_PIN
-spi_transfer:
     ldi	    ZL, lo8(SPI0_base)
     ldi	    ZH, hi8(SPI0_base)
-    ldi	    r25, SPI_SSD_bm
+    ldi	    r25, SPI_SSD_bm ; 0x04
     std	    Z + SPI_CTRLB_offset, r25
-    ldi	    r25, SPI_ENABLE_bm | SPI_MASTER_bm | SPI_CLK2X_bm | SPI_PRESC_DIV4_gc
+    ldi	    r25, SPI_ENABLE_bm | SPI_MASTER_bm | SPI_CLK2X_bm | SPI_PRESC_DIV4_gc ; 0x31
     std	    Z + SPI_CTRLA_offset, r25
+    cbi	    CSN_PORT, CSN_PIN
+spi_transfer:    
     std     Z + SPI_DATA_offset, r24
 wait_spi:
     ldd	    r24, Z + SPI_INTFLAGS_offset
@@ -208,7 +206,8 @@ nrf24_command:
     rcall   nrf24_begin
     mov	    r24, r22
     rcall   spi_transfer
-    sbi	    CSN_PORT_OUT, CSN_PIN
+nrf24_end:    
+    sbi	    CSN_PORT, CSN_PIN
     ret
   
 nrf24_setaddress_from_usersig:
@@ -222,7 +221,8 @@ nrf24_setaddress_from_x:
 nrf24_status:    
     ldi	    r24, RF_STATUS
     rjmp    nrf24_command
-       
+    
+      
 SETUP_VALUE = (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | (1 << RF_DR_HIGH)
 
 radio_registers:

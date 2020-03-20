@@ -7,7 +7,15 @@ static const uint16_t VERSION = 0x900;
 
 struct nrfPacket
 {
-#if !REVERSED_PACKETS
+	nrfPacket()
+	{
+		magic0 = 0x88;
+		magic1 = 0x99;
+		cmd = 'F';
+		addresshi = 0x34; // SRAM
+		addresslo = 0x00;
+		numpackets = 0x00;
+	}
 	uint8_t magic0, magic1;
 	uint8_t cmd;
 	uint8_t addresslo;
@@ -17,22 +25,9 @@ struct nrfPacket
 		uint8_t numpackets;
 		uint8_t eepromvalue;
 	};
-#else
-	uint8_t pad[26];
-	union
-	{
-		uint8_t numpackets;
-		uint8_t eepromvalue;
-	};
-	uint8_t addresshi;
-	uint8_t addresslo;
-	uint8_t cmd;
-	uint8_t magic1, magic0;
-#endif
-	nrfPacket() : magic0(0x88), magic1(0x99) {}
 };
 nrfPacket packet;
-
+nrfPacket syncPacket;
 
 uint8_t nrf24_status();
 uint8_t nrf24_command(uint8_t cmd, uint8_t data = NOP);
@@ -55,11 +50,13 @@ uint8_t nrf24_command(uint8_t cmd, uint8_t data)
 uint8_t nrf24_begin(uint8_t cmd)
 {
 	digitalWrite(PIN_PB0, LOW);
+	delayMicroseconds(5);
 	return SPI.transfer(cmd);
 }
 inline void nrf24_end()
 {
 	digitalWrite(PIN_PB0, HIGH);
+	delayMicroseconds(5);
 }
 inline bool nrf24_rx_available()
 {
@@ -97,8 +94,12 @@ void nrf24_init()
 }
 void nrf24_begin_tx()
 {
+	nrf24_write_register(CONFIG, 0);
+	nrf24_command(FLUSH_RX);
+	nrf24_command(FLUSH_TX);
+	nrf24_write_register(RF_STATUS, _BV(MAX_RT));
 	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP));
-	delay(10);
+	delay(5);
 }
 void nrf24_begin_rx()
 {
@@ -148,12 +149,22 @@ uint8_t uartAddress [] = { 'U','0','1' };
 uint16_t startT;
 int getch()
 {
-	while (!Serial.available() && ((uint16_t)millis()) - startT < 1000);
+	while (!Serial.available())
+	{
+		uint16_t t = millis();
+		if (t - startT > 1000)
+			break;
+		KeepAlive(t);
+	}
 	return Serial.read();
 }
 inline void putch(int ch)
 {
-	while (!Serial.availableForWrite());
+	while (!Serial.availableForWrite())
+	{
+		uint16_t t = millis();
+		KeepAlive(t);
+	}
 	Serial.write(ch);
 }
 
@@ -186,16 +197,25 @@ void OpenUart()
 	serialbufpos = 0;
 }
 
+bool SendSyncPacket()
+{
+	return nrf24_tx(&syncPacket, sizeof(syncPacket)) && nrf24_tx_end();
+}
+void KeepAlive(uint16_t t)
+{
+	static uint16_t lastSyncTime = 0;
+	if (t - lastSyncTime > 250)
+	{
+		lastSyncTime = t;
+		SendSyncPacket();
+	}
+}
+
 uint8_t OpenStk500()
 {
-	nrf24_write_register(CONFIG, 0);
 	nrf24_set_tx_address(progAddress);
 	nrf24_begin_tx();
 
-	packet.cmd = 'F';
-	packet.addresshi = 0x35; // SRAM
-	packet.addresslo = 0x00;
-	packet.numpackets = 0x00;
 	// wait for 4 sync packets to be received.  Up to 3 can fit in
 	// the receivers FIFO so only with 4 can we be sure the bootloader
 	// has actually started pulling them out of the FIFO.
@@ -203,14 +223,14 @@ uint8_t OpenStk500()
 	uint8_t successes = 0;
 	for(;;)
 	{
-		if (nrf24_tx(&packet, sizeof(packet)) && nrf24_tx_end())
+		if (SendSyncPacket())
 		{
 			if (++successes == 4)
 				break;
 		}
 		else
 		{
-			if (++retries == 20)
+			if (++retries == 30)
 				break;
 			delay(50);
 		}
@@ -220,7 +240,6 @@ uint8_t OpenStk500()
 
 bool RespondToStk500Sync()
 {
-	lastSendTime = millis();
 	serialbufpos = 0;
 	putch(STK_INSYNC);
 	putch(STK_OK);
@@ -228,11 +247,14 @@ bool RespondToStk500Sync()
 	if (OpenStk500() == 4)
 	{
 		putch(STK_OK);
+		Serial.flush();
+		lastSendTime = millis();
 		gMode = MODE_STK500;
 	}
 	else
 	{
 		putch(STK_FAILED);
+		Serial.flush();
 		OpenUart();
 	}
 }
@@ -266,10 +288,22 @@ uint8_t MatchSerialCommand(const char* seq, uint8_t len)
 	return len;
 }
 
+char inbuf[256];
+uint8_t inbufpos = 0;
+
 void HandleUart()
 {
 	uint16_t t = millis();
 	uint8_t stk500match = 0;
+
+	while (inbufpos < 256 - 32 && nrf24_rx_available())
+	{
+		uint8_t size = nrf24_command(R_RX_PL_WID);
+		nrf24_begin(R_RX_PAYLOAD);
+		while (size--)
+			inbuf[inbufpos++] = SPI.transfer(0);
+		nrf24_end();
+	}
 
 	if (serialbufpos < 32 && Serial.available())
 		serialbuf[serialbufpos++] = Serial.read();
@@ -282,18 +316,15 @@ void HandleUart()
 	}
 	if (!stk500match) // don't talk back on serial if STK500 is being initiated
 	{
-		while (nrf24_rx_available())
-		{
-			uint8_t size = nrf24_command(R_RX_PL_WID);
-			nrf24_begin(R_RX_PAYLOAD);
-			while (size--)
-				putch(SPI.transfer(0));
-			nrf24_end();
-			delay(5);
+		if (inbufpos > 0)
+		{			
+			Serial.write(inbuf, inbufpos);
+			//Serial.flush();
+			inbufpos = 0;
 		}
 	}
 
-	uint8_t idcmd = MatchSerialCommand("*cfg\n", 4) + MatchSerialCommand("*cfg\r", 4);
+	uint8_t idcmd = MatchSerialCommand("*cfg\n", 4);
 	if (idcmd == 4)
 	{
 		OpenConfig();
@@ -302,7 +333,6 @@ void HandleUart()
 
 	if (serialbufpos == 32 || (serialbufpos > 0 && t - lastSendTime > 100 && !stk500match && !idcmd))
 	{
-		nrf24_write_register(CONFIG, 0);
 		nrf24_begin_tx();
 		nrf24_tx(serialbuf, serialbufpos);
 		nrf24_tx_end();
@@ -318,7 +348,15 @@ void HandleUart()
 void HandleStk500()
 {
 	if (!Serial.available())
+	{
+		uint16_t t = millis();
+		// time out after 5 seconds
+		if (t - lastSendTime > 5000)
+			OpenUart();
+		else 
+			KeepAlive(t);
 		return;
+	}
 
 	uint8_t tmp[32];
 	bool failed = false;
@@ -330,13 +368,7 @@ void HandleStk500()
 	{
 	case STK_GET_SYNC:
 	{
-		if (!verifySpace())
-			return;
-		packet.cmd = 'F';
-		packet.addresshi = 0x35; // SRAM
-		packet.addresslo = 0x00;
-		packet.numpackets = 0x00;
-		if (!nrf24_tx(&packet, sizeof(packet)) || !nrf24_tx_end())
+		if (!verifySpace() || !SendSyncPacket())
 			failed = true;
 		break;
 	}
@@ -413,48 +445,53 @@ void HandleStk500()
 		length |= getch();
 		uint8_t desttype = getch();
 
-		if (desttype == 'F')
+		failed = true;
+		if (length <= 64)
 		{
-			packet.cmd = 'F';
-			packet.addresshi += 0x80;
-			
-			if (length <= 64)
+			char packetbuf[64];
+			for (uint8_t i = 0; i < length; ++i)
+				packetbuf[i] = getch();
+
+			if (desttype == 'F')
 			{
-				char packetbuf[64];
+				packet.cmd = 'F';
+				packet.addresshi += 0x80;
 				packet.numpackets = (length + 31) / 32;
-#if !REVERSED_PACKETS
-				for (uint8_t i = 0; i < length; ++i)
-					packetbuf[i] = getch();
-#else
-				uint8_t n = packet.numpackets * 32;
-				for (uint16_t i = 0; i < n; ++i)
-					packetbuf[n - 1 - i] = getch();
-				packet.addresslo += n;
-				if (packet.addresslo < n)
-					++packet.addresshi;
-#endif
-				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
-					failed = true;
-				for (uint8_t i = 0; i < 64; i += 32)
-					if (!failed && !nrf24_tx(&packetbuf[i], 32))
-						failed = true;
+				if (nrf24_tx(&packet, sizeof(packet)))
+				{
+					failed = false;
+					for (uint8_t i = 0; i < 64; i += 32)
+					{
+						if (!nrf24_tx(&packetbuf[i], 32))
+						{
+							failed = true;
+							break;
+						}
+					}
+				}
 			}
-			else
+			else 
+			{
+				failed = false;
+				packet.cmd = 'E';
+				if (desttype == 'E')
+					packet.addresshi += 0x14;
+				else if (desttype == 'U')
+					packet.addresshi += 0x13;
+				else
+					failed = true;
+				for(uint8_t i = 0; !failed && i < length; ++i)
+				{
+					packet.eepromvalue = packetbuf[i];
+					if (!nrf24_tx(&packet, sizeof(packet)))
+						failed = true;
+					++packet.addresslo;
+				}
+			}
+			if (!nrf24_tx_end())
 				failed = true;
 		}
 		else
-		{
-			packet.cmd = 'E';
-			packet.addresshi += 0x14;
-			while (length--)
-			{
-				packet.eepromvalue = getch();
-				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
-					failed = true;
-				++packet.addresslo;
-			}
-		}
-		if (!nrf24_tx_end())
 			failed = true;
 		// Read command terminator, start reply
 		if (!verifySpace())
@@ -506,10 +543,10 @@ void HandleStk500()
 	}
 	}
 	putch(failed ? STK_FAILED : STK_OK);
+	Serial.flush();
 	uint16_t t = millis();
 	if (failed || finished || t - lastSendTime > 5000)
 	{
-		Serial.flush();
 		OpenUart();
 	}
 	else
@@ -521,7 +558,7 @@ void HandleStk500()
 bool ResetDevice()
 {
 	uint8_t success = OpenStk500();
-	if (success >= 4)
+	if (success == 4)
 	{
 		Serial.println("Device reset successfully");
 		return true;
@@ -571,6 +608,13 @@ void HandleConfigure()
 		PrintAddresses();
 		ResetDevice();
 	}
+	else if (memcmp(serialbuf, "id ", 3) == 0)
+	{
+		uartAddress[1] = progAddress[1] = serialbuf[4];
+		uartAddress[2] = progAddress[2] = serialbuf[5];
+		PrintAddresses();
+		ResetDevice();
+	}
 	else if (memcmp(serialbuf, "setid ", 6) == 0)
 	{
 		if (ResetDevice())
@@ -591,11 +635,7 @@ void HandleConfigure()
 			if (!failed && !nrf24_tx(&packet, sizeof(packet)))
 				failed = true;
 			// trigger a reset back into the bootloader to reconfigure the radio address
-			packet.cmd = 'F';
-			packet.addresshi = 0x35;
-			packet.addresslo = 0x00;
-			packet.numpackets = 0x00;
-			if (!failed && nrf24_tx(&packet, sizeof(packet)) && nrf24_tx_end())
+			if (!failed && SendSyncPacket())
 			{
 				// address updated successfully
 				uartAddress[1] = progAddress[1] = serialbuf[7];
@@ -620,7 +660,7 @@ void setup()
 	pinMode(PIN_PB0, OUTPUT);
 	pinMode(PIN_PB1, OUTPUT);
 	digitalWrite(PIN_PB1, HIGH);
-	Serial.begin(500000);	
+	Serial.begin(500000);
 	nrf24_init();
 	while (nrf24_read_register(RF_SETUP) != ((1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | (1 << RF_DR_HIGH)))
 	{

@@ -23,6 +23,9 @@ The STK500NRF24 sketch should be used on another MCU with an nRF24L01+ in order 
 
 There is also a configuration mode that can be accessed by sending the command \*cfg over the serial link.  When in this mode you can select the address of the radio to program and also reconfigure the connected radio's address.
 
+# pystk500
+avrdude can be a bit temperamental sometimes, particularly if the application is talking back to the host over serial, so I've included a small python script that can be used instead.  It requires the pyserial and intelhex python modules.  It also has extra functionality for setting the radio ID on the command line and is a bit quicker than avrdude.
+
 # API
 The bootloader exposes a few functions that the application can make use of:
 
@@ -30,10 +33,11 @@ The bootloader exposes a few functions that the application can make use of:
 	uint8_t nrf24_status(); // retrieve the value of the radio's status register
     uint8_t nrf24_transfer(uint8_t cmd); // set CSN low and transfer byte to the radio over SPI
     uint8_t nrf24_command(uint8_t cmd, uint8_t data = RF24_NOP); // send a two byte command to the radio and set CSN high
+	void	nrf24_read_payload(uint8_t* buffer, uint8_t length); // read payload from RX FIFO
     
 I should probably make a library file for these but you can just add this to the linker command line:
 
-    -Wl,--defsym,nrf24_status=2 -Wl,--defsym,nrf24_command=4 -Wl,--defsym,nrf24_transfer=6 -Wl,--defsym,nrf24_boot_poll=8
+    -Wl,--defsym,nrf24_status=2 -Wl,--defsym,nrf24_command=4 -Wl,--defsym,nrf24_transfer=6 -Wl,--defsym,nrf24_read_payload=8 -Wl,--defsym,nrf24_boot_poll=10
 
 Other useful functions:
 
@@ -47,5 +51,5 @@ If you're using megaTinyCore https://github.com/SpenceKonde/megaTinyCore you can
 
 	atxy4rf.name=ATtiny1614/1604/814/804/414/404/214/204 (nRF24 boot)
 	atxy4rf.upload.speed=500000
-    atxy4rf.compiler.c.elf.extra_flags=-Wl,--defsym,nrf24_status=2 -Wl,--defsym,nrf24_command=4 -Wl,--defsym,nrf24_transfer=6 -Wl,--defsym,nrf24_boot_poll=8
+    atxy4rf.compiler.c.elf.extra_flags=-Wl,--defsym,nrf24_status=2 -Wl,--defsym,nrf24_command=4 -Wl,--defsym,nrf24_transfer=6 -Wl,--defsym,nrf24_read_payload=8 -Wl,--defsym,nrf24_boot_poll=10
     atxy4rf.build.text_section_start=.text=0x100

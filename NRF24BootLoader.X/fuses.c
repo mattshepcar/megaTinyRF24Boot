@@ -1,7 +1,7 @@
 #include <avr/io.h>
 #include <avr/eeprom.h>
 
-const char rxtxid[6] __attribute__ ((section (".user_signatures"))) = "001";
+const char rxtxid[] __attribute__ ((section (".user_signatures"))) = "001";
 
 FUSES = {
 	.WDTCFG = 0x00,			/* Watchdog Configuration */
@@ -14,8 +14,3 @@ FUSES = {
 	.APPEND = 0x00,			/* Application Code Section End */
 	.BOOTEND = 0x01			/* Boot Section End */
 };
-
-void test()
-{
-    
-}
