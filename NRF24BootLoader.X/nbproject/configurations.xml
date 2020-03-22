@@ -21,6 +21,7 @@
     <itemPath>fuses.c</itemPath>
     <itemPath>main.S</itemPath>
     <itemPath>nRF24L01.h</itemPath>
+    <itemPath>registers.h</itemPath>
   </logicalFolder>
   <sourceRootList>
     <Elem>.</Elem>

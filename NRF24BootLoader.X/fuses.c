@@ -4,7 +4,7 @@
 const char rxtxid[] __attribute__ ((section (".user_signatures"))) = "001";
 
 FUSES = {
-	.WDTCFG = 0x00,			/* Watchdog Configuration */
+	.WDTCFG = 0x08,			/* Watchdog Configuration */
 	.BODCFG = 0x00,			/* BOD Configuration */
 	.OSCCFG = 0x02,			/* Oscillator Configuration */
 	.reserved_1 = 0xFF,

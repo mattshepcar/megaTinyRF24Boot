@@ -5,7 +5,7 @@ import argparse
 
 class Stk500:
     def __init__(self, comport, baudrate, verbose):
-        self.ser = serial.Serial(comport, baudrate, parity=serial.PARITY_EVEN, timeout=5, stopbits=serial.STOPBITS_TWO)
+        self.ser = serial.Serial(comport, baudrate, parity=serial.PARITY_EVEN, timeout=5, stopbits=serial.STOPBITS_ONE)
         self.verbose = verbose
         
     def connect(self):
@@ -81,6 +81,7 @@ class Stk500:
             x += self.ser.read()
     
 def main():
+    sys.excepthook = lambda exctype,exc,traceback : print("{}: {}".format(exctype.__name__, exc))
     parser = argparse.ArgumentParser(description="Simple command line"
                                      " interface for UPDI programming")
     parser.add_argument("-c", "--comport", required=True,
@@ -106,6 +107,7 @@ def main():
         for start, end in ih.segments():
             prog.program(start, ih.tobinarray(start, end))
         prog.close()
+        print("Done!")
 
 if __name__ == "__main__":
     main()

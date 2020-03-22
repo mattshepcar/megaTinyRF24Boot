@@ -9,22 +9,15 @@ struct nrfPacket
 {
 	nrfPacket()
 	{
-		magic0 = 0x88;
-		magic1 = 0x99;
-		cmd = 'F';
-		addresshi = 0x34; // SRAM
-		addresslo = 0x00;
+		command = 0x9D; // CPU_CCP_SPM_gc
 		numpackets = 0x00;
+		addresslo = 0x00;
+		addresshi = 0x34; // INTERNAL_SRAM_START
 	}
-	uint8_t magic0, magic1;
-	uint8_t cmd;
+	uint8_t command;
+	uint8_t numpackets;
 	uint8_t addresslo;
 	uint8_t addresshi;
-	union
-	{
-		uint8_t numpackets;
-		uint8_t eepromvalue;
-	};
 };
 nrfPacket packet;
 nrfPacket syncPacket;
@@ -453,46 +446,27 @@ void HandleStk500()
 				packetbuf[i] = getch();
 
 			if (desttype == 'F')
-			{
-				packet.cmd = 'F';
-				packet.addresshi += 0x80;
-				packet.numpackets = (length + 31) / 32;
-				if (nrf24_tx(&packet, sizeof(packet)))
-				{
-					failed = false;
-					for (uint8_t i = 0; i < 64; i += 32)
-					{
-						if (!nrf24_tx(&packetbuf[i], 32))
-						{
-							failed = true;
-							break;
-						}
-					}
-				}
-			}
-			else 
+				packet.addresshi += 0x80; // progmem
+			else if (desttype == 'E')
+				packet.addresshi += 0x14; // eeprom
+			else if (desttype == 'U')
+				packet.addresshi += 0x13; // userrow
+			packet.numpackets = (length + 31) / 32;
+			if (nrf24_tx(&packet, sizeof(packet)))
 			{
 				failed = false;
-				packet.cmd = 'E';
-				if (desttype == 'E')
-					packet.addresshi += 0x14;
-				else if (desttype == 'U')
-					packet.addresshi += 0x13;
-				else
-					failed = true;
-				for(uint8_t i = 0; !failed && i < length; ++i)
+				for (uint8_t i = 0; i < length; i += 32)
 				{
-					packet.eepromvalue = packetbuf[i];
-					if (!nrf24_tx(&packet, sizeof(packet)))
+					if (!nrf24_tx(&packetbuf[i], min(32, length - i)))
+					{
 						failed = true;
-					++packet.addresslo;
+						break;
+					}
 				}
+				if (!nrf24_tx_end())
+					failed = true;
 			}
-			if (!nrf24_tx_end())
-				failed = true;
 		}
-		else
-			failed = true;
 		// Read command terminator, start reply
 		if (!verifySpace())
 			return;
@@ -527,7 +501,7 @@ void HandleStk500()
 	{
 		if (!verifySpace())
 			return;
-		packet.cmd = 'R';
+		packet.numpackets = 0xFF;
 		if (!nrf24_tx(&packet, sizeof(packet)) || !nrf24_tx_end())
 			failed = true;
 		
@@ -621,19 +595,20 @@ void HandleConfigure()
 		{
 			bool failed = false;
 			// reprogram the user signature area with new address
-			packet.cmd = 'E';
 			packet.addresshi = 0x13; 
-			for (uint8_t i = 0; i < 3; ++i)
+			packet.addresslo = 0;
+			packet.numpackets = 1;
+			if (!nrf24_tx(&packet, sizeof(packet)) ||
+				!nrf24_tx(&serialbuf[6], 3))
 			{
-				packet.addresslo = i;
-				packet.eepromvalue = serialbuf[i + 6];
-				if (!failed && !nrf24_tx(&packet, sizeof(packet)))
-					failed = true;
+				failed = true;
 			}
 			// exit from the bootloader
-			packet.cmd = 'R'; 
-			if (!failed && !nrf24_tx(&packet, sizeof(packet)))
+			nrfPacket resetPacket;
+			resetPacket.command = 0;
+			if (!failed && !nrf24_tx(&resetPacket, sizeof(resetPacket)))
 				failed = true;
+			
 			// trigger a reset back into the bootloader to reconfigure the radio address
 			if (!failed && SendSyncPacket())
 			{
