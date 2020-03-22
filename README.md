@@ -29,7 +29,7 @@ avrdude can be a bit temperamental sometimes, particularly if the application is
 # API
 The bootloader exposes a few functions that the application can make use of:
 
-extern "C" {
+    extern "C" {
     void nrf24_boot_poll(); // reset into the bootloader if any programming packets are received
     uint8_t nrf24_status(); // retrieve the value of the radio's status register
     uint8_t nrf24_command(uint8_t cmd, uint8_t data = 0); // send a two byte command to the radio
@@ -42,7 +42,7 @@ extern "C" {
     inline void nrf24_write_register(uint8_t reg, uint8_t data) { nrf24_command(reg | W_REGISTER, data); }
     inline uint8_t nrf24_read_register(uint8_t reg) { return nrf24_command(reg, 0); }
     inline void nrf24_end() { VPORTB.OUT |= 1; }
-}
+    }
     
 I should probably make a library file for these but you can just add this to the linker command line:
 
