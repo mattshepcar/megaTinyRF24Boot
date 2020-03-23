@@ -501,8 +501,9 @@ void HandleStk500()
 	{
 		if (!verifySpace())
 			return;
-		packet.numpackets = 0xFF;
-		if (!nrf24_tx(&packet, sizeof(packet)) || !nrf24_tx_end())
+		nrfPacket resetPacket;
+		resetPacket.command = 0;
+		if (!nrf24_tx(&resetPacket, sizeof(resetPacket)) || !nrf24_tx_end())
 			failed = true;
 		
 		finished = true;
@@ -593,24 +594,16 @@ void HandleConfigure()
 	{
 		if (ResetDevice())
 		{
-			bool failed = false;
 			// reprogram the user signature area with new address
-			packet.addresshi = 0x13; 
+			packet.addresshi = 0x13; // USERROW
 			packet.addresslo = 0;
 			packet.numpackets = 1;
-			if (!nrf24_tx(&packet, sizeof(packet)) ||
-				!nrf24_tx(&serialbuf[6], 3))
-			{
-				failed = true;
-			}
-			// exit from the bootloader
 			nrfPacket resetPacket;
 			resetPacket.command = 0;
-			if (!failed && !nrf24_tx(&resetPacket, sizeof(resetPacket)))
-				failed = true;
-			
-			// trigger a reset back into the bootloader to reconfigure the radio address
-			if (!failed && SendSyncPacket())
+			if (nrf24_tx(&packet, sizeof(packet)) &&
+				nrf24_tx(&serialbuf[6], 3) &&
+				nrf24_tx(&resetPacket, sizeof(resetPacket)) && // exit from the bootloader
+				SendSyncPacket()) // trigger a reset back into the bootloader to reconfigure the radio address
 			{
 				// address updated successfully
 				uartAddress[1] = progAddress[1] = serialbuf[7];
