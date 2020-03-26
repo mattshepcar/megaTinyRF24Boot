@@ -55,14 +55,16 @@ class Stk500:
         else:
             print('Unknown segment 0x%08X-0x%08X' % (start, start + len(data)))
             return
-    
-        for pos in range(0, len(data), 64):
+
+        sys.stdout.write("Writing %i bytes to %s" % (size, name))
+        for pos in range(0, size, 64):
             addr = start + pos
-            page = data[pos:pos+64]
-            sys.stdout.write('\rWriting %s %i/%i bytes' % (name, pos, size))
+            page = data[pos:pos+64]            
+            sys.stdout.write('.')
+            sys.stdout.flush()
             self.send(bytes([0x55, addr&255, (addr>>8)&255]))
             self.send(bytes([0x64, 0, len(page)]), type, page)
-        print('\rWriting %s %i/%i bytes' % (name, size, size))
+        print('done!')
         
     def close(self):
         self.send(b'Q')
@@ -92,7 +94,7 @@ def main():
     parser.add_argument("-s", "--setid", help="Reprogram remote radio ID")
     parser.add_argument("-v", "--verbose", action='store_true', help="Verbose output")
     args = parser.parse_args(sys.argv[1:])
-    prog = Stk500(args.comport, args.baudrate, args.verbose)   
+    prog = Stk500(args.comport, args.baudrate, args.verbose)
     if args.id:
         prog.sendcommand(b'*cfg\n')
         prog.sendcommand(b'id %s\n' % args.id.encode('utf-8'))

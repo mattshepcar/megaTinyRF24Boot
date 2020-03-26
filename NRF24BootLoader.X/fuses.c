@@ -1,7 +1,10 @@
 #include <avr/io.h>
-#include <avr/eeprom.h>
 
-const char rxtxid[] __attribute__ ((section (".user_signatures"))) = "001";
+const uint8_t userrow[] __attribute__ ((section (".user_signatures"))) = 
+{
+    '0', '0', '1', // address
+    50 // channel
+};
 
 FUSES = {
 	.WDTCFG = 0x08,			/* Watchdog Configuration */

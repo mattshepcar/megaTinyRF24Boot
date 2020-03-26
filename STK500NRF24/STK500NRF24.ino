@@ -3,7 +3,13 @@
 #include "nRF24L01.h"
 #include <string.h>
 
+#define NRF24_CSN_PIN PIN_PB0
+#define NRF24_CE_PIN PIN_PB1
 static const uint16_t VERSION = 0x900;
+uint8_t gProgAddress [] = { 'P','0','1' };
+uint8_t gUartAddress [] = { 'U','0','1' };
+uint8_t gChannel = 50;
+uint8_t gDataRate = (1 << RF_DR_HIGH);
 
 struct nrfPacket
 {
@@ -12,7 +18,7 @@ struct nrfPacket
 		command = 0x9D; // CPU_CCP_SPM_gc
 		numpackets = 0x00;
 		addresslo = 0x00;
-		addresshi = 0x34; // INTERNAL_SRAM_START
+		addresshi = 0x38; // INTERNAL_SRAM_START
 	}
 	uint8_t command;
 	uint8_t numpackets;
@@ -31,7 +37,7 @@ inline void nrf24_write_register(uint8_t reg, uint8_t data) { nrf24_command(reg 
 inline uint8_t nrf24_read_register(uint8_t reg) { return nrf24_command(reg, 0); }
 inline uint8_t nrf24_status()
 {
-	return nrf24_read_register(RF_STATUS);
+	return nrf24_read_register(STATUS_NRF);
 }
 uint8_t nrf24_command(uint8_t cmd, uint8_t data)
 {
@@ -42,13 +48,13 @@ uint8_t nrf24_command(uint8_t cmd, uint8_t data)
 }
 uint8_t nrf24_begin(uint8_t cmd)
 {
-	digitalWrite(PIN_PB0, LOW);
+	digitalWrite(NRF24_CSN_PIN, LOW);
 	delayMicroseconds(5);
 	return SPI.transfer(cmd);
 }
 inline void nrf24_end()
 {
-	digitalWrite(PIN_PB0, HIGH);
+	digitalWrite(NRF24_CSN_PIN, HIGH);
 	delayMicroseconds(5);
 }
 inline bool nrf24_rx_available()
@@ -71,14 +77,14 @@ void nrf24_set_tx_address(const uint8_t address[3])
 void nrf24_init()
 {
 	SPI.begin();
-	digitalWrite(PIN_PB0, HIGH);
+	digitalWrite(NRF24_CSN_PIN, HIGH);
 	delay(5);
 	nrf24_write_register(CONFIG, 0);
 	nrf24_write_register(EN_AA, 0x3F);
 	nrf24_write_register(SETUP_AW, 1);
-	nrf24_write_register(RF_CH, 76);
-	nrf24_write_register(SETUP_RETR, 0x7F);
-	nrf24_write_register(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | (1 << RF_DR_HIGH));
+	nrf24_write_register(SETUP_RETR, 15);
+	nrf24_write_register(RF_CH, gChannel);
+	nrf24_write_register(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | gDataRate);
 	nrf24_write_register(FEATURE, (1 << EN_DPL));
 	nrf24_write_register(DYNPD, 1);
 	nrf24_write_register(EN_RXADDR, 1);
@@ -90,37 +96,17 @@ void nrf24_begin_tx()
 	nrf24_write_register(CONFIG, 0);
 	nrf24_command(FLUSH_RX);
 	nrf24_command(FLUSH_TX);
-	nrf24_write_register(RF_STATUS, _BV(MAX_RT));
+	nrf24_write_register(STATUS_NRF, _BV(MAX_RT));
 	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP));
 	delay(5);
 }
 void nrf24_begin_rx()
 {
+	nrf24_write_register(RF_CH, gChannel);
 	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP) | (1 << PRIM_RX));
 }
-bool nrf24_tx(const void* data, uint8_t len)
-{
-	uint8_t status;
-	const uint8_t* addr = (const uint8_t*) data;
-	for (;;)
-	{
-		status = nrf24_status();
-		if (!(status & _BV(TX_FULL)))
-			break;
-		if (status & _BV(MAX_RT))
-		{
-			nrf24_write_register(RF_STATUS, status);
-			nrf24_command(FLUSH_TX, 0);
-			return false;
-		}
-	}
-	nrf24_begin(W_TX_PAYLOAD);
-	while (len--)
-		SPI.transfer(*addr++);
-	nrf24_end();
-	return true;
-}
-bool nrf24_tx_end()
+uint16_t gPacketLoss = 0;
+bool nrf24_tx_end(uint8_t retries = 16, uint8_t resendDelay = 1, bool waitForWrite = false)
 {
 	for (;;)
 	{
@@ -129,15 +115,35 @@ bool nrf24_tx_end()
 		uint8_t status = nrf24_status();
 		if (status & _BV(MAX_RT))
 		{
-			nrf24_write_register(RF_STATUS, status);
-			nrf24_command(FLUSH_TX, 0);
-			return false;
+			nrf24_write_register(STATUS_NRF, status);
+			if (retries-- > 0)
+			{
+				++gPacketLoss;
+				digitalWrite(NRF24_CE_PIN, LOW);
+				delay(resendDelay);
+				digitalWrite(NRF24_CE_PIN, HIGH);
+			}
+			else
+			{
+				nrf24_command(FLUSH_TX, 0);
+				return false;
+			}
 		}
+		if (waitForWrite && !(status & _BV(TX_FULL)))
+			return true;
 	}
 }
-
-uint8_t progAddress [] = { 'P','0','1' };
-uint8_t uartAddress [] = { 'U','0','1' };
+bool nrf24_tx(const void* data, uint8_t len, uint8_t retries = 16, uint8_t resendDelay = 1)
+{
+	if (!nrf24_tx_end(retries, resendDelay, true))
+		return false;
+	const uint8_t* addr = (const uint8_t*) data;
+	nrf24_begin(W_TX_PAYLOAD);
+	while (len--)
+		SPI.transfer(*addr++);
+	nrf24_end();
+	return true;
+}
 
 uint16_t startT;
 int getch()
@@ -168,7 +174,7 @@ bool verifySpace()
 	return insync;
 }
 
-uint8_t serialbuf[32];
+char serialbuf[32];
 uint8_t serialbufpos = 0;
 uint8_t stk500mode;
 uint16_t lastSendTime = 0;
@@ -180,12 +186,15 @@ enum eMode
 	MODE_CONFIGURE,
 };
 eMode gMode = MODE_UART;
+uint8_t gScanning = 0;
+uint8_t gScanLine = 0;
+uint8_t gScanNo = 0;
 
 void OpenUart()
 {
 	gMode = MODE_UART;
 	nrf24_write_register(CONFIG, 0);
-	nrf24_set_tx_address(uartAddress);
+	nrf24_set_tx_address(gUartAddress);
 	nrf24_begin_rx();
 	serialbufpos = 0;
 }
@@ -206,7 +215,8 @@ void KeepAlive(uint16_t t)
 
 uint8_t OpenStk500()
 {
-	nrf24_set_tx_address(progAddress);
+	gPacketLoss = 0;
+	nrf24_set_tx_address(gProgAddress);
 	nrf24_begin_tx();
 
 	// wait for 4 sync packets to be received.  Up to 3 can fit in
@@ -223,7 +233,7 @@ uint8_t OpenStk500()
 		}
 		else
 		{
-			if (++retries == 30)
+			if (++retries == 10) // todo: timeout setting
 				break;
 			delay(50);
 		}
@@ -231,7 +241,9 @@ uint8_t OpenStk500()
 	return successes;
 }
 
-bool RespondToStk500Sync()
+bool ChangeRadioSettings(uint8_t channel, uint8_t datarate);
+
+void RespondToStk500Sync()
 {
 	serialbufpos = 0;
 	putch(STK_INSYNC);
@@ -254,19 +266,28 @@ bool RespondToStk500Sync()
 
 void PrintAddresses()
 {
-	uint8_t a0 = uartAddress[1];
-	uint8_t a1 = uartAddress[2];
-	Serial.printf("UART addr = %02x%02x%02x  Programming addr = %02x%02x%02x\n", 'U', a0, a1, 'P', a0, a1);
+	uint8_t a0 = gUartAddress[1];
+	uint8_t a1 = gUartAddress[2];
+	Serial.printf("Channel = %i  UART addr = %02x%02x%02x  Programming addr = %02x%02x%02x\n", gChannel, 'U', a0, a1, 'P', a0, a1);
 }
+
+void ScanChannels();
 
 void OpenConfig()
 {
 	gMode = MODE_CONFIGURE;
-	Serial.write("\nConfigure STK500-nRF24L01+ interface\n");
+	Serial.println("\nConfigure STK500-nRF24L01+ interface");
+	Serial.println("\n addr <xyz> [channel]  - set address of target device");
+	Serial.println(" ch <channel>           - set channel of target device");
+	Serial.println(" setid <xyz> [channel]  - reprogram target device's listen address");
+	Serial.println(" setch <channel>        - reprogram target device's channel (erases application)");
+	Serial.println(" reset                  - reset target device\n");
+	Serial.println(" scan                   - scan for available channels\n");
 	PrintAddresses();
-	Serial.write("\n addr <xyz>   - set address of target device\n");
-	Serial.write(" setid <xyz>  - reprogram target device's listen address\n");
-	Serial.write(" r            - reset target device\n>");
+	Serial.print(gPacketLoss);
+	Serial.println(" packets lost during last programming attempt");
+	Serial.write(">");
+
 	serialbufpos = 0;
 	while (Serial.read() >= 0);
 }
@@ -351,7 +372,6 @@ void HandleStk500()
 		return;
 	}
 
-	uint8_t tmp[32];
 	bool failed = false;
 	bool finished = false;
 
@@ -451,13 +471,14 @@ void HandleStk500()
 				packet.addresshi += 0x14; // eeprom
 			else if (desttype == 'U')
 				packet.addresshi += 0x13; // userrow
-			packet.numpackets = (length + 31) / 32;
+			uint8_t packetsize = 32;
+			packet.numpackets = (length + packetsize - 1) / packetsize;
 			if (nrf24_tx(&packet, sizeof(packet)))
 			{
 				failed = false;
-				for (uint8_t i = 0; i < length; i += 32)
+				for (uint8_t i = 0; i < length; i += packetsize)
 				{
-					if (!nrf24_tx(&packetbuf[i], min(32, length - i)))
+					if (!nrf24_tx(&packetbuf[i], min(packetsize, length - i)))
 					{
 						failed = true;
 						break;
@@ -477,7 +498,7 @@ void HandleStk500()
 	{
 		int16_t length = getch() << 8;
 		length |= getch();
-		uint8_t desttype = getch();
+		/*uint8_t desttype =*/ getch();
 		if (!verifySpace())
 			return;
 		//failed = true;
@@ -546,8 +567,103 @@ bool ResetDevice()
 	}
 }
 
+bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
+{
+	bool success = false;
+	// reprogram the first flash page with a small program to restart 
+	// the bootloader with new radio settings. the radio reverts
+	// back to its original settings if the watchdog kicks in.
+	static const uint8_t reprogramApp [] =
+	{
+		0x03, 0xFC, // sbrc r0, RSTCTRL_WDRF_bp 
+		0xEB, 0xCF,	// rjmp wait_for_command
+		0xAA, 0xDF, // rcall nrf24_set_config
+		0xD9, 0xCF, // rjmp start_bootloader_custom_channel
+	};
+	nrfPacket resetPacket;
+	resetPacket.command = 0; // r21 config value
+	resetPacket.addresslo = sizeof(reprogramApp);
+	resetPacket.addresshi = 0x81;
+	resetPacket.numpackets = 0;
+	packet.addresslo = 0;
+	packet.addresshi = 0x81; // PROGMEM
+	packet.numpackets = 2;
+	if (nrf24_tx(&packet, sizeof(packet)) &&
+		nrf24_tx(&reprogramApp[0], sizeof(reprogramApp)) &&
+		nrf24_tx(&channel, 1) &&
+		nrf24_tx(&resetPacket, sizeof(resetPacket)) &&
+		nrf24_tx_end())
+	{
+		Serial.println("Sent channel change request OK");
+		// change our radio settings
+		nrf24_write_register(CONFIG, 0);
+		nrf24_write_register(RF_CH, channel);
+		nrf24_write_register(RF_SETUP, _BV(RF_PWR_LOW) | _BV(RF_PWR_HIGH) | datarate);
+
+		if (ResetDevice())
+		{
+			success = true;
+		}
+		else
+		{
+			Serial.println("Failed to switch radio channel");
+
+			// failed, change settings back
+			nrf24_write_register(CONFIG, 0);
+			nrf24_write_register(RF_CH, gChannel);
+			nrf24_write_register(RF_SETUP, _BV(RF_PWR_LOW) | _BV(RF_PWR_HIGH) | gDataRate);
+
+			ResetDevice();
+		}
+
+		static const uint8_t standbyProgram [] =
+		{
+			0x86, 0xDF,// app: rcall nrf24_poll_reset
+			0xFE, 0xCF,//      rjmp  app
+		};
+		packet.numpackets = 1;
+		if (nrf24_tx(&packet, sizeof(packet)) &&
+			nrf24_tx(&standbyProgram[0], sizeof(standbyProgram)) &&
+			nrf24_tx_end())
+		{
+			Serial.println("Channel switcher program cleared OK");
+		}
+		else
+		{
+			Serial.println("Warning: failed to clear channel switcher");
+		}
+	}
+	else
+	{
+		Serial.println("Failed to send channel change request");
+	}
+
+	return success;
+}
+
+void SetChannel(const char* ch)
+{
+	gChannel = atoi(ch);
+	nrf24_write_register(RF_CH, gChannel);
+	PrintAddresses();
+}
+
+void SetAddress(const char* addr)
+{
+	nrf24_write_register(CONFIG, 0);
+	gUartAddress[1] = gProgAddress[1] = addr[1];
+	gUartAddress[2] = gProgAddress[2] = addr[2];
+	if (addr[3] == ' ' || addr[3] == ',' || addr[3] == ':')
+		SetChannel(&addr[4]);
+	else
+		PrintAddresses();
+}
+
 void HandleConfigure()
 {
+	if (gScanning)
+		ScanChannels();
+
 	if (!Serial.available())
 		return;
 	char ch = Serial.read();
@@ -566,6 +682,7 @@ void HandleConfigure()
 	}
 	if (ch != 0)
 		return;
+	gScanning = false;
 	if (serialbufpos == 1 || serialbuf[0] == 'q')
 	{
 		Serial.println("done.");
@@ -576,46 +693,87 @@ void HandleConfigure()
 	{
 		ResetDevice();
 	}
-	else if (memcmp(serialbuf, "addr ", 5) == 0)
+	else if (serialbuf[0] == 's' && serialbuf[1] == 'c')
 	{
-		uartAddress[1] = progAddress[1] = serialbuf[6];
-		uartAddress[2] = progAddress[2] = serialbuf[7];
-		PrintAddresses();
-		ResetDevice();
+		gScanning = true;
+		gScanNo = 0;
+		OutputChannelHeader();
+		serialbufpos = 0;
+		return;
+	}
+	else if (memcmp(serialbuf, "ch", 2) == 0 && strchr(serialbuf, ' '))
+	{
+		SetChannel(strchr(serialbuf, ' ') + 1);
+	}
+	else if (memcmp(serialbuf, "ad", 2) == 0 && strchr(serialbuf, ' '))
+	{
+		SetAddress(strchr(serialbuf, ' ') + 1);
 	}
 	else if (memcmp(serialbuf, "id ", 3) == 0)
 	{
-		uartAddress[1] = progAddress[1] = serialbuf[4];
-		uartAddress[2] = progAddress[2] = serialbuf[5];
-		PrintAddresses();
-		ResetDevice();
+		SetAddress(&serialbuf[3]);
 	}
 	else if (memcmp(serialbuf, "setid ", 6) == 0)
 	{
 		if (ResetDevice())
 		{
-			// reprogram the user signature area with new address
+			// reprogram the user signature area with new address/channel
 			packet.addresshi = 0x13; // USERROW
 			packet.addresslo = 0;
 			packet.numpackets = 1;
+			uint8_t addrsize = 3;
+			if (serialbuf[9] == ' ' || serialbuf[9] == ',' || serialbuf[9] == ':')
+			{
+				serialbuf[9] = atoi(&serialbuf[10]);
+				addrsize = 4;
+				// the new channel will only be programmed if ChangeRadioSettings succeeds
+				// i.e. we can definitely talk to the device on the new channel
+			}
 			nrfPacket resetPacket;
 			resetPacket.command = 0;
-			if (nrf24_tx(&packet, sizeof(packet)) &&
-				nrf24_tx(&serialbuf[6], 3) &&
+			if ((addrsize < 4 || ChangeRadioSettings(serialbuf[9], gDataRate)) &&
+				nrf24_tx(&packet, sizeof(packet)) &&
+				nrf24_tx(&serialbuf[6], addrsize) &&
 				nrf24_tx(&resetPacket, sizeof(resetPacket)) && // exit from the bootloader
 				SendSyncPacket()) // trigger a reset back into the bootloader to reconfigure the radio address
 			{
 				// address updated successfully
-				uartAddress[1] = progAddress[1] = serialbuf[7];
-				uartAddress[2] = progAddress[2] = serialbuf[8];
+				gUartAddress[1] = gProgAddress[1] = serialbuf[7];
+				gUartAddress[2] = gProgAddress[2] = serialbuf[8];
+				if (addrsize == 4)
+					gChannel = serialbuf[9];
 				PrintAddresses();
 			}
 			// re-establish connection on new address
 			ResetDevice();
 		}
-		else
+	}
+	else if (memcmp(serialbuf, "setch ", 6) == 0)
+	{
+		uint8_t channel = atoi(&serialbuf[6]);
+		if (ResetDevice() && ChangeRadioSettings(channel, gDataRate))
 		{
-			Serial.println("Error communicating with target device");
+			// reprogram the user signature area with new address
+			packet.addresshi = 0x13; // USERROW
+			packet.addresslo = 0x03;
+			packet.numpackets = 1;
+			nrfPacket resetPacket;
+			resetPacket.command = 0;
+			if (nrf24_tx(&packet, sizeof(packet)) &&
+				nrf24_tx(&channel, 1) &&
+				nrf24_tx(&resetPacket, sizeof(resetPacket)) && // exit from the bootloader
+				SendSyncPacket()) // trigger a reset back into the bootloader to reconfigure the radio address
+			{
+				Serial.println("Reprogrammed radio channel OK");
+				gChannel = channel;
+				PrintAddresses();
+			}
+			else
+			{
+				Serial.println("Failed reprogramming radio channel");
+			}
+			// re-establish connection on new address
+			ResetDevice();
 		}
 	}
 	serialbufpos = 0;
@@ -623,14 +781,98 @@ void HandleConfigure()
 	Serial.flush();
 }
 
+// Array to hold Channel data
+#define CHANNELS  64
+uint8_t channel[CHANNELS];
+
+// greyscale mapping
+static const char grey [] = " .:-=+*aRW";
+
+void OutputChannelHeader()
+{
+	Serial.println(" 0         1         2         3         4         5         6");
+	Serial.println(" 0123456789012345678901234567890123456789012345678901234567890123");
+	Serial.println(">      1 2  3 4  5  6 7 8  9 10 11 12 13  14                     <");
+	gScanLine = 0;
+}
+
+// outputs channel data as a simple grey map
+void OutputChannels()
+{
+	if (++gScanLine == 12)
+		OutputChannelHeader();
+
+	uint8_t norm = 0;
+
+	// find the maximal count in channel array
+	for (int i = 0; i < CHANNELS; i++)
+		if (channel[i] > norm) norm = channel[i];
+
+	// now output the data
+	Serial.print('|');
+	for (int i = 0; i < CHANNELS; i++)
+	{
+		uint8_t pos;
+
+		// calculate grey value position
+		if (norm != 0) pos = (uint16_t(channel[i]) * 10) / norm;
+		else          pos = 0;
+
+		// boost low values
+		if (pos == 0 && channel[i] > 0) pos++;
+
+		// clamp large values
+		if (pos > 9) pos = 9;
+
+		// print it out
+		Serial.print(grey[pos]);
+		channel[i] = 0;
+	}
+
+	// indicate overall power
+	Serial.print("| ");
+	Serial.println(norm);
+}
+
+// scanning all channels in the 2.4GHz band
+void ScanChannels()
+{
+	digitalWrite(NRF24_CE_PIN, LOW);
+	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP) | (1 << PRIM_RX));
+	for (uint8_t i = 0; i < CHANNELS; i++)
+	{
+		// select a new channel
+		nrf24_write_register(RF_CH, (128 * i) / CHANNELS);
+
+		// switch on RX
+		digitalWrite(NRF24_CE_PIN, HIGH);
+		delayMicroseconds(130);
+		// this is actually the point where the RPD-flag
+		// is set, when CE goes low
+		digitalWrite(NRF24_CE_PIN, LOW);
+
+		// read out RPD flag; set to 1 if
+		// received power > -64dBm
+		if (nrf24_read_register(RPD) > 0)
+			channel[i]++;
+	}
+	nrf24_write_register(RF_CH, gChannel);
+	digitalWrite(NRF24_CE_PIN, HIGH);
+	if (++gScanNo == 200)
+	{
+		OutputChannels();
+		gScanNo = 0;
+	}
+}
+
 void setup()
 {
-	pinMode(PIN_PB0, OUTPUT);
-	pinMode(PIN_PB1, OUTPUT);
-	digitalWrite(PIN_PB1, HIGH);
+	pinMode(NRF24_CSN_PIN, OUTPUT);
+	pinMode(NRF24_CE_PIN, OUTPUT);
+	digitalWrite(NRF24_CE_PIN, HIGH);
 	Serial.begin(500000);
 	nrf24_init();
-	while (nrf24_read_register(RF_SETUP) != ((1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | (1 << RF_DR_HIGH)))
+	while (nrf24_read_register(RF_SETUP) != ((1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | gDataRate))
 	{
 		Serial.println("radio not connected");
 		nrf24_init();
