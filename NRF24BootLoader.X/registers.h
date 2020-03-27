@@ -1,7 +1,7 @@
 #ifndef REGISTERS_H
 #define	REGISTERS_H
 
-#define SPI0_base 0x801 
+#define SPI0_base 0x803
 #define SPI_CTRLA_offset (SPI0_CTRLA - SPI0_base)
 #define SPI_CTRLB_offset (SPI0_CTRLB - SPI0_base)
 #define SPI_DATA_offset (SPI0_DATA - SPI0_base)

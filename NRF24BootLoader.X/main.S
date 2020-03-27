@@ -119,7 +119,7 @@ nrf24_command_long: ; for W_TX_PAYLOAD etc..
 write_loop:
     subi    r20, 1
     brlt    nrf24_transfer_end
-nrf24_command_data_x:    
+nrf24_command_data_x:
     rcall   nrf24_begin
     ld      r24, X+
     rjmp    write_loop
@@ -185,22 +185,20 @@ start_bootloader_custom_channel:
         
     ; if reset was from watchdog then start the app
     ldi	    ZH, hi8(RSTCTRL_RSTFR)
-    ldd	    r0, Z + RSTCTRL_RSTFR - 1
-    std	    Z + RSTCTRL_RSTFR - 1, r0
+    ldd	    r0, Z + RSTCTRL_RSTFR - 3
+    std	    Z + RSTCTRL_RSTFR - 3, r0
     sbrc    r0, RSTCTRL_WDRF_bp 
     rjmp    app
 
     ; Main programming loop
 write_nvm:
-    ; first time through this does nothing (r121 is wrong)
-    ldi	    ZH, hi8(NVMCTRL_CTRLA) ; ZL = 1 from SPI0_base
-    ldi     r24, NVMCTRL_CMD_PAGEERASEWRITE_gc
+    ; first time through this does nothing because r21 is wrong
     out	    CPU_CCP, r21
-    st	    -Z, r24
-wait_nvm:
-    ldd	    r24, Z + (NVMCTRL_STATUS - NVMCTRL_CTRLA)
-    andi    r24, NVMCTRL_FBUSY_bm|NVMCTRL_EEBUSY_bm
-    brne    wait_nvm        
+    sts	    NVMCTRL_CTRLA, ZL
+    
+    ; send a byte back
+    ldi	    r24, W_ACK_PAYLOAD + 5
+    rcall   nrf24_command_data_x
 wait_for_command:
     ; turn on LED and radio CE
     out     VPORTA_OUT, r16
@@ -231,12 +229,18 @@ read_command:
     ldd     XH, Y + 3
     cpi     r21, CPU_CCP_SPM_gc
     breq    read_page
-        
+    
+    rjmp    app
+checksum:
+    ; CRC16 of above xored with 0x84CF results in entire bootloader
+    ; having a CRC of 0xFFFF
+    .byte 0xAF, 0x30
+    
     .org 0x100
 app:    
     ; dummy app that just waits for an incoming reboot message
 #ifdef LED_PIN
-    ;sbi	    LED_PORT, LED_PIN
+    sbi	    LED_PORT, LED_PIN
 #endif
     rcall   nrf24_poll_reset
     rjmp    app

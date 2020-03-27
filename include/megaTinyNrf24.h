@@ -36,16 +36,16 @@ bool nrf24_rx_available();
 bool nrf24_tx_available();
 
 // write payload to TX FIFO (blocks if full, returns false if max retries exceeded)
-bool nrf24_write_fast(const uint8_t* data, uint8_t len);
+static bool nrf24_write_fast(const uint8_t* data, uint8_t len);
 
 // wait for TX FIFO to empty (returns false if max retries exceeded)
-bool nrf24_tx_standby();
+static bool nrf24_tx_standby();
 
 // write ack payload
 void nrf24_write_ack_payload(uint8_t pipe, const uint8_t* data, uint8_t count);
 
 // switch to TX mode, write data to UART pipe then switch back to RX mode
-void nrf24_write_uart(const void* data, uint16_t len);
+static void nrf24_write_uart(const void* data, uint16_t len);
 void nrf24_write_uart(const char* str);
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -148,7 +148,7 @@ static void nrf24_write_uart(const void* data, uint16_t len)
     const uint8_t* addr = (const uint8_t*) data;
     for (uint8_t i = 0; i < len;)
     {
-        uint8_t packetlen = min(32, len);
+        uint8_t packetlen = min(32u, len);
         nrf24_write_fast(&addr[i], packetlen);
         i += packetlen;
     }

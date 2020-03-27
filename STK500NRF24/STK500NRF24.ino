@@ -2,7 +2,9 @@
 #include "src/stk500.h"
 #include "nRF24L01.h"
 #include <string.h>
+#include <util/crc16.h>
 
+//#define COUNT_ALL_RESENDS 1
 #define NRF24_CSN_PIN PIN_PB0
 #define NRF24_CE_PIN PIN_PB1
 static const uint16_t VERSION = 0x900;
@@ -85,7 +87,7 @@ void nrf24_init()
 	nrf24_write_register(SETUP_RETR, 15);
 	nrf24_write_register(RF_CH, gChannel);
 	nrf24_write_register(RF_SETUP, (1 << RF_PWR_LOW) | (1 << RF_PWR_HIGH) | gDataRate);
-	nrf24_write_register(FEATURE, (1 << EN_DPL));
+	nrf24_write_register(FEATURE, (1 << EN_DPL) | (1 << EN_ACK_PAY) | (1 << EN_DYN_ACK));
 	nrf24_write_register(DYNPD, 1);
 	nrf24_write_register(EN_RXADDR, 1);
 	nrf24_command(FLUSH_TX);
@@ -105,20 +107,38 @@ void nrf24_begin_rx()
 	nrf24_write_register(RF_CH, gChannel);
 	nrf24_write_register(CONFIG, (1 << MASK_RX_DR) | (1 << MASK_TX_DS) | (1 << MASK_MAX_RT) | (1 << CRCO) | (1 << EN_CRC) | (1 << PWR_UP) | (1 << PRIM_RX));
 }
-uint16_t gPacketLoss = 0;
+uint16_t gPacketsResent = 0;
+uint16_t gPacketsSent = 0;
+uint16_t gLastProgrammedAddress = 0;
+uint16_t gCrc = 0;
+int16_t gLastAck = -1;
+bool gDataPending = false;
 bool nrf24_tx_end(uint8_t retries = 16, uint8_t resendDelay = 1, bool waitForWrite = false)
 {
+	uint16_t startTime = millis();
 	for (;;)
 	{
-		if (nrf24_read_register(FIFO_STATUS) & _BV(TX_EMPTY))
+		uint8_t fifostatus = nrf24_read_register(FIFO_STATUS);
+		if (!(fifostatus & _BV(RX_EMPTY)))
+		{
+			gLastAck = nrf24_command(R_RX_PAYLOAD);
+		}
+		if (fifostatus & _BV(TX_EMPTY))
+		{
+#if COUNT_ALL_RESENDS
+			if (gDataPending)
+				gPacketsResent += nrf24_read_register(OBSERVE_TX) & 15;
+			gDataPending = waitForWrite;
+#endif
 			return true;
+		}
 		uint8_t status = nrf24_status();
 		if (status & _BV(MAX_RT))
 		{
-			nrf24_write_register(STATUS_NRF, status);
+			nrf24_write_register(STATUS_NRF, _BV(MAX_RT));
 			if (retries-- > 0)
 			{
-				++gPacketLoss;
+				++gPacketsResent;
 				digitalWrite(NRF24_CE_PIN, LOW);
 				delay(resendDelay);
 				digitalWrite(NRF24_CE_PIN, HIGH);
@@ -129,8 +149,22 @@ bool nrf24_tx_end(uint8_t retries = 16, uint8_t resendDelay = 1, bool waitForWri
 				return false;
 			}
 		}
+#if !COUNT_ALL_RESENDS
 		if (waitForWrite && !(status & _BV(TX_FULL)))
 			return true;
+#endif
+		uint16_t t = millis() - startTime;
+		if (t > 500)
+		{
+			nrf24_command(FLUSH_TX);
+
+			Serial.print("FIFO STATUS = ");
+			Serial.print(fifostatus, HEX);
+			Serial.print("\nSTATUS = ");
+			Serial.print(status, HEX);
+			Serial.println("\nTimed out in transmit!!!");
+			return false;
+		}
 	}
 }
 bool nrf24_tx(const void* data, uint8_t len, uint8_t retries = 16, uint8_t resendDelay = 1)
@@ -142,6 +176,7 @@ bool nrf24_tx(const void* data, uint8_t len, uint8_t retries = 16, uint8_t resen
 	while (len--)
 		SPI.transfer(*addr++);
 	nrf24_end();
+	++gPacketsSent;
 	return true;
 }
 
@@ -215,7 +250,10 @@ void KeepAlive(uint16_t t)
 
 uint8_t OpenStk500()
 {
-	gPacketLoss = 0;
+	gPacketsResent = 0;
+	gPacketsSent = 0;
+	gLastProgrammedAddress = 0;
+	gCrc = 0xFFFF;
 	nrf24_set_tx_address(gProgAddress);
 	nrf24_begin_tx();
 
@@ -284,10 +322,15 @@ void OpenConfig()
 	Serial.println(" reset                  - reset target device\n");
 	Serial.println(" scan                   - scan for available channels\n");
 	PrintAddresses();
-	Serial.print(gPacketLoss);
-	Serial.println(" packets lost during last programming attempt");
-	Serial.write(">");
+	Serial.print(gPacketsResent);
+	Serial.write(" retransmits for ");
+	Serial.print(gPacketsSent);
+	Serial.println(" packets during last programming attempt");
+	Serial.print("CRC = 0x");
+	Serial.print(gCrc, HEX);
+	Serial.print("\n>");
 
+	gPacketsResent = 0;
 	serialbufpos = 0;
 	while (Serial.read() >= 0);
 }
@@ -466,25 +509,28 @@ void HandleStk500()
 				packetbuf[i] = getch();
 
 			if (desttype == 'F')
+			{
 				packet.addresshi += 0x80; // progmem
+				gLastProgrammedAddress = ((packet.addresshi << 8) | packet.addresslo) + length;
+				uint16_t crc = gCrc;
+				for (uint8_t i = 0; i < length; ++i)
+					crc = _crc_xmodem_update(crc, packetbuf[i]);
+				gCrc = crc;
+			}
 			else if (desttype == 'E')
+			{
 				packet.addresshi += 0x14; // eeprom
+			}
 			else if (desttype == 'U')
+			{
 				packet.addresshi += 0x13; // userrow
-			uint8_t packetsize = 32;
-			packet.numpackets = (length + packetsize - 1) / packetsize;
-			if (nrf24_tx(&packet, sizeof(packet)))
+			}
+			if (WriteMemory((packet.addresshi << 8) | packet.addresslo, packetbuf, length))
 			{
 				failed = false;
-				for (uint8_t i = 0; i < length; i += packetsize)
-				{
-					if (!nrf24_tx(&packetbuf[i], min(packetsize, length - i)))
-					{
-						failed = true;
-						break;
-					}
-				}
 				if (!nrf24_tx_end())
+					failed = true;
+				if (packet.addresshi < 0x80 && !WaitForEepromWrites())
 					failed = true;
 			}
 		}
@@ -513,18 +559,17 @@ void HandleStk500()
 		// READ SIGN - return what Avrdude wants to hear
 		if (!verifySpace())
 			return;
-		putch(SIGROW_DEVICEID0);
-		putch(SIGROW_DEVICEID1);
-		putch(SIGROW_DEVICEID2);
+
+		putch(WriteAndReadMemory(0x10FF, 0));
+		putch(WriteAndReadMemory(0x1100, 0));
+		putch(WriteAndReadMemory(0x1101, 0));
 		break;
 	}
 	case STK_LEAVE_PROGMODE:
 	{
 		if (!verifySpace())
 			return;
-		nrfPacket resetPacket;
-		resetPacket.command = 0;
-		if (!nrf24_tx(&resetPacket, sizeof(resetPacket)) || !nrf24_tx_end())
+		if (!ExitBootloader())
 			failed = true;
 		
 		finished = true;
@@ -549,6 +594,130 @@ void HandleStk500()
 	{
 		lastSendTime = t;
 	}
+}
+
+bool WriteMemory(uint16_t address, const void* data, uint8_t length)
+{
+	const uint8_t packetsize = 32;
+	packet.addresshi = address >> 8;
+	packet.addresslo = address & 255;
+	packet.numpackets = (length + packetsize - 1) / packetsize;
+	if (!nrf24_tx(&packet, sizeof(packet)))
+		return false;
+	const uint8_t* packetbuf = (const uint8_t*) data;
+	for (uint8_t i = 0; i < length; i += packetsize)
+		if (!nrf24_tx(&packetbuf[i], min(packetsize, length - i)))
+			return false;
+	return true;
+}
+bool WriteMemory(uint16_t address, uint8_t value)
+{
+	return WriteMemory(address, &value, 1);
+}
+int16_t WriteAndReadMemory(uint16_t address, const void* data, uint8_t len)
+{
+	if (nrf24_tx_end())
+	{
+		gLastAck = -1;
+		nrf24_command(FLUSH_RX);
+		if (WriteMemory(address, data, len))
+			for (uint8_t i = 0; i < 10 && gLastAck < 0; ++i)
+				if (!SendSyncPacket())
+					break;
+	}
+	return gLastAck;
+}
+int16_t WriteAndReadMemory(uint16_t address, uint8_t value)
+{
+	return WriteAndReadMemory(address, &value, 1);
+}
+bool ExitBootloader()
+{
+	nrfPacket resetPacket;
+	resetPacket.command = 0;
+	return nrf24_tx(&resetPacket, sizeof(resetPacket)) && nrf24_tx_end();
+}
+
+bool WaitForEepromWrites()
+{
+	uint16_t startTime = millis();
+	for (;;)
+	{
+		int16_t nvmstatus = WriteAndReadMemory(0x1001, 0);
+		if (nvmstatus < 0)
+		{
+			Serial.println("Failed to read non-volatile memory controller status register");
+			return false;
+		}
+		if ((nvmstatus & 3) == 0)
+			return true;
+		uint16_t t = millis() - startTime;
+		if (t > 200)
+		{
+			Serial.println("Timed out waiting for EEPROM writes!");
+			return false;
+		}
+	}
+}
+
+void WriteCrc()
+{
+	if (gLastProgrammedAddress >= 0xC000)
+		return;
+
+	// fill the unprogrammed parts of flash with 0xFF
+	uint8_t pagebuf[64];
+	memset(pagebuf, 0xFF, 64);
+	for (uint16_t addr = (gLastProgrammedAddress + 63) & ~63; addr < 0xC000; addr += 64)
+	{
+		int16_t r = WriteAndReadMemory(addr, pagebuf, 64);
+		if (r < 0)
+		{
+			Serial.println("Error writing CRC");
+			return;
+		}
+		// if next page starts with 0xFF assume it is blank
+		if (r == 0xFF)
+			break;
+	}
+	// calculate CRC
+	uint16_t crc = gCrc;
+	uint16_t addr = gLastProgrammedAddress;
+	for (; addr < 0xBFFE; ++addr)
+		crc = _crc_xmodem_update(crc, 0xFF);
+	pagebuf[62] = (uint8_t) (crc >> 8);
+	pagebuf[63] = (uint8_t) crc;
+	crc = _crc_xmodem_update(crc, pagebuf[62]);
+	crc = _crc_xmodem_update(crc, pagebuf[63]);
+	gCrc = crc;
+	// write the CRC
+	if (WriteMemory(0xBFE0, pagebuf, 64) && nrf24_tx_end())
+		Serial.println("Updated CRC successfully!");
+	else
+		Serial.println("Error writing CRC");
+
+	PerformCrcCheck();
+}
+bool PerformCrcCheck()
+{
+	Serial.println("Requesting CRC check");
+	// set CRCSCAN.ENABLE=1
+	uint8_t vals [] = { 1, 0 };
+	int16_t crcstatus = WriteAndReadMemory(0x120, vals, 2); 
+	if (crcstatus < 0)
+	{
+		Serial.println("Failed to read CRC check status!");
+		return false;
+	}
+	if ((crcstatus & 3) == 2)
+	{
+		Serial.println("CRC check passed OK!");
+		return true;
+	}
+	Serial.print("CRC status = ");
+	Serial.print(crcstatus, HEX);
+	Serial.println("\nCRC check failed!");
+	return false;
 }
 
 bool ResetDevice()
@@ -616,6 +785,11 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 			ResetDevice();
 		}
 
+		// it's only necessary to erase the channel switcher program because
+		// reprogramming the channel in USERROW relies on reentering the app to
+		// trigger a full software reset to reboot the bootloader with the
+		// new radio settings.  we could rely on the watchdog timeout instead to
+		// reboot but it would be slower.
 		static const uint8_t standbyProgram [] =
 		{
 			0x86, 0xDF,// app: rcall nrf24_poll_reset
@@ -691,7 +865,11 @@ void HandleConfigure()
 	}
 	if (serialbuf[0] == 'r')
 	{
-		ResetDevice();
+		if (ResetDevice() && ExitBootloader())
+		{
+			OpenUart();
+			return;
+		}
 	}
 	else if (serialbuf[0] == 's' && serialbuf[1] == 'c')
 	{
@@ -700,6 +878,16 @@ void HandleConfigure()
 		OutputChannelHeader();
 		serialbufpos = 0;
 		return;
+	}
+	else if (memcmp(serialbuf, "crc", 3) == 0)
+	{
+		if (ResetDevice())
+			PerformCrcCheck();
+	}
+	else if (memcmp(serialbuf, "setcrc", 6) == 0)
+	{
+		if (ResetDevice())
+			WriteCrc();
 	}
 	else if (memcmp(serialbuf, "ch", 2) == 0 && strchr(serialbuf, ' '))
 	{
@@ -718,9 +906,6 @@ void HandleConfigure()
 		if (ResetDevice())
 		{
 			// reprogram the user signature area with new address/channel
-			packet.addresshi = 0x13; // USERROW
-			packet.addresslo = 0;
-			packet.numpackets = 1;
 			uint8_t addrsize = 3;
 			if (serialbuf[9] == ' ' || serialbuf[9] == ',' || serialbuf[9] == ':')
 			{
@@ -729,12 +914,10 @@ void HandleConfigure()
 				// the new channel will only be programmed if ChangeRadioSettings succeeds
 				// i.e. we can definitely talk to the device on the new channel
 			}
-			nrfPacket resetPacket;
-			resetPacket.command = 0;
 			if ((addrsize < 4 || ChangeRadioSettings(serialbuf[9], gDataRate)) &&
-				nrf24_tx(&packet, sizeof(packet)) &&
-				nrf24_tx(&serialbuf[6], addrsize) &&
-				nrf24_tx(&resetPacket, sizeof(resetPacket)) && // exit from the bootloader
+				WriteMemory(0x1300, &serialbuf[6], addrsize) &&
+				WaitForEepromWrites() &&
+				ExitBootloader() &&
 				SendSyncPacket()) // trigger a reset back into the bootloader to reconfigure the radio address
 			{
 				// address updated successfully
@@ -753,15 +936,9 @@ void HandleConfigure()
 		uint8_t channel = atoi(&serialbuf[6]);
 		if (ResetDevice() && ChangeRadioSettings(channel, gDataRate))
 		{
-			// reprogram the user signature area with new address
-			packet.addresshi = 0x13; // USERROW
-			packet.addresslo = 0x03;
-			packet.numpackets = 1;
-			nrfPacket resetPacket;
-			resetPacket.command = 0;
-			if (nrf24_tx(&packet, sizeof(packet)) &&
-				nrf24_tx(&channel, 1) &&
-				nrf24_tx(&resetPacket, sizeof(resetPacket)) && // exit from the bootloader
+			if (WriteMemory(0x1303, channel) &&
+				WaitForEepromWrites() &&
+				ExitBootloader() && 
 				SendSyncPacket()) // trigger a reset back into the bootloader to reconfigure the radio address
 			{
 				Serial.println("Reprogrammed radio channel OK");
