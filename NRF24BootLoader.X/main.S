@@ -55,19 +55,7 @@ nrf24_poll_reset:
     ldi	    r24, CPU_CCP_IOREG_gc
     out	    CPU_CCP, r24
     sts	    RSTCTRL_SWRR, r25
-
-radio_registers:
-    .byte W_REGISTER | CONFIG, 0 ; power down 
-    .byte W_REGISTER | EN_AA, 0x3F ; auto acknowledge on all pipes
-    .byte W_REGISTER | SETUP_AW, (ADDRESS_WIDTH - 2)
-    .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; high power, high data rate
-    .byte W_REGISTER | DYNPD, 0x3F ; dynamic payload on all pipes  
-    .byte W_REGISTER | RX_ADDR_P5, 'P' ; programming pipe address
-    .byte W_REGISTER | FEATURE, _BV(EN_DPL)|_BV(EN_ACK_PAY)|_BV(EN_DYN_ACK) ; dynamic payloads
-    .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
-    .byte R_REGISTER | RF_SETUP, 0 ; read back setup register to check radio is present   
-radio_registers_end:
-        
+       
 nrf24_begin:
     ldi	    ZL, lo8(SPI0_base)
     ldi	    ZH, hi8(SPI0_base)
@@ -90,23 +78,6 @@ nrf24_begin_tx:
     ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP)
     ldi	    r22, 1
     rjmp    nrf24_begin_rxtx
-nrf24_begin_rx:
-    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP) | _BV(PRIM_RX)
-    mov	    r22, r24
-nrf24_begin_rxtx:
-    ldi	    r24, W_REGISTER | EN_RXADDR
-    rcall   nrf24_command
-nrf24_set_config:
-    mov	    r22, r21
-    ldi	    r24, W_REGISTER | CONFIG
-nrf24_command:
-    rcall   nrf24_begin
-    mov	    r24, r22
-nrf24_transfer_end:
-    rcall   spi_transfer
-nrf24_end:
-    sbi	    CSN_PORT, CSN_PIN
-    ret
         
 nrf24_set_tx_address:
     ldi	    r24, W_REGISTER | TX_ADDR
@@ -143,6 +114,37 @@ read_packet:
     movw    r24, X
     rjmp    nrf24_end
 
+radio_registers:
+    .byte W_REGISTER | CONFIG, 0 ; power down 
+    .byte W_REGISTER | EN_AA, 0x3F ; auto acknowledge on all pipes
+    .byte W_REGISTER | SETUP_AW, (ADDRESS_WIDTH - 2)
+    .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; high power, high data rate
+    .byte W_REGISTER | DYNPD, 0x3F ; dynamic payload on all pipes  
+    .byte W_REGISTER | RX_ADDR_P5, 'P' ; programming pipe address
+    .byte W_REGISTER | FEATURE, _BV(EN_DPL)|_BV(EN_ACK_PAY)|_BV(EN_DYN_ACK) ; dynamic payloads
+    .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
+    .byte R_REGISTER | RF_SETUP, 0 ; read back setup register to check radio is present   
+    .org 128 ; relying on this ending at 0x8080
+radio_registers_end:
+    
+nrf24_begin_rx:
+    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP) | _BV(PRIM_RX)
+    mov	    r22, r24
+nrf24_begin_rxtx:
+    ldi	    r24, W_REGISTER | EN_RXADDR
+    rcall   nrf24_command
+nrf24_set_config:
+    mov	    r22, r21
+    ldi	    r24, W_REGISTER | CONFIG
+nrf24_command:
+    rcall   nrf24_begin
+    mov	    r24, r22
+nrf24_transfer_end:
+    rcall   spi_transfer
+nrf24_end:
+    sbi	    CSN_PORT, CSN_PIN
+    ret
+    
 start_bootloader:
     ldi	    YL, lo8(radio_registers + MAPPED_PROGMEM_START)
     ldi	    YH, hi8(radio_registers + MAPPED_PROGMEM_START)
@@ -190,6 +192,10 @@ start_bootloader_custom_channel:
     sbrc    r0, RSTCTRL_WDRF_bp 
     rjmp    app
 
+    ; command packet buffer at 0x3F80 (safe on all chips)
+    ldi     YH, 0x3F
+    ;ldi     YL, 0x80  ; already 0x80 from radio_registers_end
+    
     ; Main programming loop
 write_nvm:
     ; first time through this does nothing because r21 is wrong
@@ -203,10 +209,9 @@ wait_for_command:
     ; turn on LED and radio CE
     out     VPORTA_OUT, r16
     out	    VPORTB_OUT, r17
-    ldi     XH, hi8(INTERNAL_SRAM_START) ; packet buffer
+    ; read next packet to command buffer
+    movw    X, Y
 read_page:
-    ; save packet address in Y
-    movw    Y, X
 wait_for_packet:
     rcall   nrf24_status
     subi    r24, 0xE
@@ -234,10 +239,15 @@ read_command:
 checksum:
     ; CRC16 of above xored with 0x84CF results in entire bootloader
     ; having a CRC of 0xFFFF
-    .byte 0xAF, 0x30
+    .byte 0xB6, 0xCF
     
     .org 0x100
 app:    
+    ;sbrc r0, RSTCTRL_WDRF_bp 
+    ;rjmp wait_for_command
+    ;rcall nrf24_set_config
+    ;rjmp start_bootloader_custom_channel  
+    
     ; dummy app that just waits for an incoming reboot message
 #ifdef LED_PIN
     sbi	    LED_PORT, LED_PIN

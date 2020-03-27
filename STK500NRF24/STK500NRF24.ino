@@ -16,8 +16,8 @@ struct nrfPacket
 {
 	uint8_t command = 0x9D; // CPU_CCP_SPM_gc
 	uint8_t numpackets = 0;
-	uint8_t addresslo = 0;
-	uint8_t addresshi = 0x38; // INTERNAL_SRAM_START
+	uint8_t addresslo = 0x80; // last 128 bytes of SRAM
+	uint8_t addresshi = 0x3F; 
 };
 
 uint8_t nrf24_status();
@@ -774,8 +774,8 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 	static const uint8_t reprogramApp [] =
 	{
 		0x03, 0xFC, // sbrc r0, RSTCTRL_WDRF_bp 
-		0xEB, 0xCF,	// rjmp wait_for_command
-		0xAA, 0xDF, // rcall nrf24_set_config
+		0xEA, 0xCF,	// rjmp wait_for_command
+		0xC1, 0xDF, // rcall nrf24_set_config
 		0xD9, 0xCF, // rjmp start_bootloader_custom_channel
 	};
 	nrfPacket resetPacket;

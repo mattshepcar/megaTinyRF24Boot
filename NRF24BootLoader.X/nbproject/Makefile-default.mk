@@ -88,11 +88,29 @@ LDLIBSOPTIONS=
 # fixDeps replaces a bunch of sed/cat/printf statements that slow down the build
 FIXDEPS=fixDeps
 
+# The following macros may be used in the pre and post step lines
+Device=ATtiny1614
+ProjectDir="C:\dev\arduino\megaTinyRF24Boot\NRF24BootLoader.X"
+ProjectName=NRF24BootLoader
+ConfName=default
+ImagePath="dist\default\${IMAGE_TYPE}\NRF24BootLoader.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}"
+ImageDir="dist\default\${IMAGE_TYPE}"
+ImageName="NRF24BootLoader.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}"
+ifeq ($(TYPE_IMAGE), DEBUG_RUN)
+IsDebug="true"
+else
+IsDebug="false"
+endif
+
 .build-conf:  ${BUILD_SUBPROJECTS}
 ifneq ($(INFORMATION_MESSAGE), )
 	@echo $(INFORMATION_MESSAGE)
 endif
 	${MAKE}  -f nbproject/Makefile-default.mk dist/${CND_CONF}/${IMAGE_TYPE}/NRF24BootLoader.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
+	@echo "--------------------------------------"
+	@echo "User defined post-build step: [python patchcrc.py ${ImagePath}]"
+	@python patchcrc.py ${ImagePath}
+	@echo "--------------------------------------"
 
 MP_PROCESSOR_OPTION=ATtiny1614
 # ------------------------------------------------------------------------------------
