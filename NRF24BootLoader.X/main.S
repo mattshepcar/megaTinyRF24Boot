@@ -42,6 +42,7 @@ nrf24_status:
     ldi	    r24, STATUS_NRF
     rjmp    nrf24_command
     rjmp    nrf24_command_long
+    rjmp    nrf24_set_config
     rjmp    nrf24_begin_rx
     rjmp    nrf24_begin_tx
     rjmp    nrf24_read_rx_payload
@@ -74,27 +75,25 @@ wait_spi:
 return:
     ret  
 
-nrf24_begin_tx:
-    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP)
-    ldi	    r22, 1
-    rjmp    nrf24_begin_rxtx
-        
-nrf24_set_tx_address:
-    ldi	    r24, W_REGISTER | TX_ADDR
-    rcall   nrf24_set_address
-    ldi	    r24, W_REGISTER | RX_ADDR_P0
-nrf24_set_address:
-    ldi	    r20, ADDRESS_WIDTH
-nrf24_command_long: ; for W_TX_PAYLOAD etc..
-    movw    X, r22
-write_loop:
-    subi    r20, 1
-    brlt    nrf24_transfer_end
-nrf24_command_data_x:
+nrf24_begin_rx:
+    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP) | _BV(PRIM_RX)
+    mov	    r22, r24
+nrf24_begin_rxtx:
+    ldi	    r24, W_REGISTER | EN_RXADDR
+    rcall   nrf24_command
+nrf24_set_config_r21:
+    mov	    r22, r21
+nrf24_set_config:    
+    ldi	    r24, W_REGISTER | CONFIG
+nrf24_command:
     rcall   nrf24_begin
-    ld      r24, X+
-    rjmp    write_loop
-
+    mov	    r24, r22
+nrf24_transfer_end:
+    rcall   spi_transfer
+nrf24_end:
+    sbi	    CSN_PORT, CSN_PIN
+    ret
+           
 nrf24_read_rx_payload:
     movw    X, r24
 nrf24_read_rx_payload_to_x:
@@ -114,36 +113,43 @@ read_packet:
     movw    r24, X
     rjmp    nrf24_end
 
+crcadjust:
+    ; this value is patched to ensure the CRC of the bootloader is 0xFFFF
+    .byte 0xCC, 0xCC
+    
 radio_registers:
     .byte W_REGISTER | CONFIG, 0 ; power down 
     .byte W_REGISTER | EN_AA, 0x3F ; auto acknowledge on all pipes
     .byte W_REGISTER | SETUP_AW, (ADDRESS_WIDTH - 2)
-    .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; high power, high data rate
+    .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; power & data rate
     .byte W_REGISTER | DYNPD, 0x3F ; dynamic payload on all pipes  
     .byte W_REGISTER | RX_ADDR_P5, 'P' ; programming pipe address
     .byte W_REGISTER | FEATURE, _BV(EN_DPL)|_BV(EN_ACK_PAY)|_BV(EN_DYN_ACK) ; dynamic payloads
     .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
     .byte R_REGISTER | RF_SETUP, 0 ; read back setup register to check radio is present   
-    .org 128 ; relying on this ending at 0x8080
-radio_registers_end:
+    .org 128 ; the code relies on this ending at exactly 0x8080
+radio_registers_end:   
     
-nrf24_begin_rx:
-    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP) | _BV(PRIM_RX)
-    mov	    r22, r24
-nrf24_begin_rxtx:
-    ldi	    r24, W_REGISTER | EN_RXADDR
-    rcall   nrf24_command
-nrf24_set_config:
-    mov	    r22, r21
-    ldi	    r24, W_REGISTER | CONFIG
-nrf24_command:
+nrf24_begin_tx:
+    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP)
+    ldi	    r22, 1
+    rjmp    nrf24_begin_rxtx
+    
+nrf24_set_tx_address:
+    ldi	    r24, W_REGISTER | TX_ADDR
+    rcall   nrf24_set_address
+    ldi	    r24, W_REGISTER | RX_ADDR_P0
+nrf24_set_address:
+    ldi	    r20, ADDRESS_WIDTH
+nrf24_command_long: ; for W_TX_PAYLOAD etc..
+    movw    X, r22
+write_loop:
+    subi    r20, 1
+    brlt    nrf24_transfer_end
+nrf24_command_data_x:
     rcall   nrf24_begin
-    mov	    r24, r22
-nrf24_transfer_end:
-    rcall   spi_transfer
-nrf24_end:
-    sbi	    CSN_PORT, CSN_PIN
-    ret
+    ld      r24, X+
+    rjmp    write_loop
     
 start_bootloader:
     ldi	    YL, lo8(radio_registers + MAPPED_PROGMEM_START)
@@ -153,8 +159,8 @@ start_bootloader:
 start_bootloader_custom_radio_settings:    
     ; configure pin dirs
     ldi	    r16, PORTA_DIR_CFG
-    out	    VPORTA_DIR, r16
     ldi	    r17, PORTB_DIR_CFG
+    out	    VPORTA_DIR, r16
     out	    VPORTB_DIR, r17
    
 init_radio:
@@ -200,7 +206,7 @@ start_bootloader_custom_channel:
 write_nvm:
     ; first time through this does nothing because r21 is wrong
     out	    CPU_CCP, r21
-    sts	    NVMCTRL_CTRLA, ZL
+    sts	    NVMCTRL_CTRLA, ZL ; ZL = 3
     
     ; send a byte back
     ldi	    r24, W_ACK_PAYLOAD + 5
@@ -234,24 +240,19 @@ read_command:
     ldd     XH, Y + 3
     cpi     r21, CPU_CCP_SPM_gc
     breq    read_page
-    
-    rjmp    app
-checksum:
-    ; CRC16 of above xored with 0x84CF results in entire bootloader
-    ; having a CRC of 0xFFFF
-    .byte 0xB6, 0xCF
-    
+  
     .org 0x100
 app:    
     ;sbrc r0, RSTCTRL_WDRF_bp 
     ;rjmp wait_for_command
-    ;rcall nrf24_set_config
+    ;rcall nrf24_set_config_r21
     ;rjmp start_bootloader_custom_channel  
     
     ; dummy app that just waits for an incoming reboot message
 #ifdef LED_PIN
     sbi	    LED_PORT, LED_PIN
 #endif
+    clr	    r0
     rcall   nrf24_poll_reset
     rjmp    app
  

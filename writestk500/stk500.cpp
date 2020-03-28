@@ -270,12 +270,15 @@ public:
 				pagesize = m_PageSize;				
 				if (writeCrc && start + size < m_FlashSize)
 				{
-					data.resize(m_FlashSize - start - 2, 0xFF);
-					uint16_t crc = crc16(&data[0], (int) data.size());
-					//crc ^= 0x84CF; // - for bootloader
+					// provided the rest of flash is cleared to zeroes we
+					// can just stick the CRC on the end of the program					
+					uint16_t crc = crc16(&data[0], size);
 					data.push_back(crc >> 8);
 					data.push_back(crc & 255);
-					size = (int) data.size();
+					// pad out to a full page with zeroes
+					//data.resize((size + pagesize - 1) & ~(pagesize - 1), 0);
+					data.resize(m_FlashSize - start, 0);
+					size = (int)data.size();
 				}
 				break;
 			case 0x81:

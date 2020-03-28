@@ -24,6 +24,9 @@ extern "C" {
 
     // power up the radio in RX mode listening on specified pipes (bitmask)
     void nrf24_begin_rx(uint8_t pipeBits);
+
+    // set the config register
+    void nrf24_set_config(uint8_t confg);
 }
 
 // get pipe number for packet in RX FIFO (or 7 if no packet in FIFO)
@@ -68,7 +71,7 @@ inline void nrf24_write_ack_payload(uint8_t pipe, const uint8_t* data, uint8_t c
 }
 inline void nrf24_power_down() 
 {
-    nrf24_write_register(CONFIG, 0); 
+    nrf24_set_config(0);
 }
 inline bool nrf24_tx_fifo_empty() 
 { 

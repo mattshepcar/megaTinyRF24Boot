@@ -101,6 +101,7 @@ uint16_t gPacketsResent = 0;
 uint16_t gPacketsSent = 0;
 uint16_t gProgramAddress = 0;
 uint16_t gLastProgrammedAddress = 0;
+uint8_t gLastPageSize = 0;
 uint16_t gCrc = 0;
 int16_t gLastAck = -1;
 bool gDataPending = false;
@@ -249,6 +250,7 @@ uint8_t OpenStk500()
 	gPacketsResent = 0;
 	gPacketsSent = 0;
 	gLastProgrammedAddress = 0;
+	gLastPageSize = 0;
 	gCrc = 0xFFFF;
 	nrf24_set_tx_address(gProgAddress);
 	nrf24_begin_tx();
@@ -426,6 +428,8 @@ uint16_t crc16(const void* data, uint16_t length, uint16_t crc = 0xFFFF)
 		crc = crc16_update(crc, *bytes++);
 	return crc;
 }
+int16_t WriteAndReadMemory(uint16_t address, const void* data, uint8_t len, uint8_t retries = 16);
+int16_t WriteAndReadMemory(uint16_t address, uint8_t value);
 
 void HandleStk500()
 {
@@ -527,9 +531,9 @@ void HandleStk500()
 		uint8_t desttype = getch();
 
 		failed = true;
-		if (length <= 64)
+		if (length <= 128)
 		{
-			char packetbuf[64];
+			char packetbuf[128];
 			for (uint8_t i = 0; i < length; ++i)
 				packetbuf[i] = getch();
 
@@ -537,6 +541,7 @@ void HandleStk500()
 			{
 				gProgramAddress += 0x8000; // progmem
 				gLastProgrammedAddress = gProgramAddress + length;
+				gLastPageSize = length;
 				gCrc = crc16(packetbuf, length, gCrc);
 			}
 			else if (desttype == 'E')
@@ -591,6 +596,7 @@ void HandleStk500()
 	{
 		if (!verifySpace())
 			return;
+
 		if (!ExitBootloader())
 			failed = true;
 		
@@ -637,7 +643,7 @@ bool WriteMemory(uint16_t address, uint8_t value)
 {
 	return WriteMemory(address, &value, 1);
 }
-int16_t WriteAndReadMemory(uint16_t address, const void* data, uint8_t len, uint8_t retries = 16)
+int16_t WriteAndReadMemory(uint16_t address, const void* data, uint8_t len, uint8_t retries)
 {
 	if (!nrf24_tx_end())
 		return -1;
@@ -688,42 +694,43 @@ bool WaitForEepromWrites()
 	}
 }
 
-void WriteCrc()
+bool WriteCrc()
 {
 	if (gLastProgrammedAddress >= 0xC000)
-		return;
+		return true;
 
-	// fill the unprogrammed parts of flash with 0xFF
-	uint8_t pagebuf[64];
-	memset(pagebuf, 0xFF, 64);
-	for (uint16_t addr = (gLastProgrammedAddress + 63) & ~63; addr < 0xC000; addr += 64)
+	// clear rest of flash memory
+	static const uint8_t pagebuf[128] = { 0 };
+	for (uint16_t addr = gLastProgrammedAddress; addr < 0xC000; addr += gLastPageSize)
 	{
-		int16_t r = WriteAndReadMemory(addr, pagebuf, 64);
+		int16_t r = WriteAndReadMemory(addr, pagebuf, gLastPageSize);
 		if (r < 0)
-		{
-			Serial.println("Error writing CRC");
-			return;
-		}
-		// if next page starts with 0xFF assume it is blank
-		if (r == 0xFF)
+			return false;
+		// if next page starts with 0 assume it is blank
+		if (r == 0)
 			break;
 	}
-	// calculate CRC
-	uint16_t crc = gCrc;
-	uint16_t addr = gLastProgrammedAddress;
-	for (; addr < 0xBFFE; ++addr)
-		crc = crc16_update(crc, 0xFF);
-	pagebuf[62] = (uint8_t) (crc >> 8);
-	pagebuf[63] = (uint8_t) crc;
-	crc = crc16_update(crc, pagebuf[62]);
-	crc = crc16_update(crc, pagebuf[63]);
-	gCrc = crc;
-	// write the CRC
-	//if (WriteMemory(0xBFE0, pagebuf, 64) && nrf24_tx_end())
-	if (WriteMemory(0xBFFE, pagebuf + 62, 2) && nrf24_tx_end())
-		Serial.println("Updated CRC successfully!");
-	else
-		Serial.println("Error writing CRC");
+	//uint8_t vals [] = { 1, 0 };
+	//int16_t crcstatus = WriteAndReadMemory(0x120, vals, 2);
+	//if (crcstatus < 0 || (crcstatus & 3) != 2)
+	//	return false;
+
+	//// calculate CRC
+	//uint16_t crc = gCrc;
+	//uint16_t addr = gLastProgrammedAddress;
+	//for (; addr < 0xBFFE; ++addr)
+	//	crc = crc16_update(crc, 0xFF);
+	//pagebuf[62] = (uint8_t) (crc >> 8);
+	//pagebuf[63] = (uint8_t) crc;
+	//crc = crc16_update(crc, pagebuf[62]);
+	//crc = crc16_update(crc, pagebuf[63]);
+	//gCrc = crc;
+	//// write the CRC
+	////if (WriteMemory(0xBFE0, pagebuf, 64) && nrf24_tx_end())
+	//if (WriteMemory(0xBFFE, pagebuf + 62, 2) && nrf24_tx_end())
+	//	Serial.println("Updated CRC successfully!");
+	//else
+	//	Serial.println("Error writing CRC");
 
 	PerformCrcCheck();
 }
@@ -774,9 +781,9 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 	static const uint8_t reprogramApp [] =
 	{
 		0x03, 0xFC, // sbrc r0, RSTCTRL_WDRF_bp 
-		0xEA, 0xCF,	// rjmp wait_for_command
-		0xC1, 0xDF, // rcall nrf24_set_config
-		0xD9, 0xCF, // rjmp start_bootloader_custom_channel
+		0xEC, 0xCF,	// rjmp wait_for_command
+		0x9F, 0xDF, // rcall nrf24_set_config_r21
+		0xDB, 0xCF, // rjmp start_bootloader_custom_channel
 	};
 	nrfPacket resetPacket;
 	resetPacket.command = 0; // r21 config value
@@ -822,8 +829,9 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 		// reboot but it would be slower.
 		static const uint8_t standbyProgram [] =
 		{
-			0x86, 0xDF,// app: rcall nrf24_poll_reset
-			0xFE, 0xCF,//      rjmp  app
+			0x00, 0x24,// clr r0
+			0x86, 0xDF,// rcall nrf24_poll_reset
+			0xFE, 0xCF,// rjmp .-4
 		};
 		packet.numpackets = 1;
 		if (nrf24_tx(&packet, sizeof(packet)) &&
