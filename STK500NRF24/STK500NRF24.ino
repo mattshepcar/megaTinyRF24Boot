@@ -782,7 +782,7 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 	{
 		0x03, 0xFC, // sbrc r0, RSTCTRL_WDRF_bp 
 		0xEC, 0xCF,	// rjmp wait_for_command
-		0x9F, 0xDF, // rcall nrf24_set_config_r21
+		0xA0, 0xDF, // rcall nrf24_set_config_r21
 		0xDB, 0xCF, // rjmp start_bootloader_custom_channel
 	};
 	nrfPacket resetPacket;
@@ -829,7 +829,6 @@ bool ChangeRadioSettings(uint8_t channel, uint8_t datarate)
 		// reboot but it would be slower.
 		static const uint8_t standbyProgram [] =
 		{
-			0x00, 0x24,// clr r0
 			0x86, 0xDF,// rcall nrf24_poll_reset
 			0xFE, 0xCF,// rjmp .-4
 		};

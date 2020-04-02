@@ -17,14 +17,21 @@
 #define CSN_PORT VPORTB_OUT
 #define CSN_PIN 0
 #define LED_PORT VPORTB_OUT
+; Set to 4 for alternate SPI pins:
+#define PORTMUXB_CFG 0
+; define which 2 ports you are using:
+#define VPORT1_DIR VPORTA_DIR
+#define VPORT1_OUT VPORTA_OUT
+#define VPORT2_DIR VPORTB_DIR
+#define VPORT2_OUT VPORTB_OUT
 ; undefine LED_PIN if no led
 #define LED_PIN 1
 #define MOSI_PIN 1
 #define SCK_PIN 3
-#define CE_PIN 0 
-; make sure to update these with the right pins on the right ports:
-#define PORTA_DIR_CFG _BV(MOSI_PIN) | _BV(SCK_PIN)
-#define PORTB_DIR_CFG _BV(CSN_PIN) | _BV(CE_PIN) | _BV(LED_PIN)
+#define CE_PIN 0
+; which pins are on which ports:
+#define PORT1_DIR_CFG _BV(MOSI_PIN) | _BV(SCK_PIN)
+#define PORT2_DIR_CFG _BV(CSN_PIN) | _BV(CE_PIN) | _BV(LED_PIN)
 
 // struct rx_return {uint8_t* packetend; uint8_t packetsize;};
 // rx_return nrf24_read_rx_payload(uint8_t* dstbuf);
@@ -42,20 +49,18 @@ nrf24_status:
     ldi	    r24, STATUS_NRF
     rjmp    nrf24_command
     rjmp    nrf24_command_long
-    rjmp    nrf24_set_config
     rjmp    nrf24_begin_rx
     rjmp    nrf24_begin_tx
     rjmp    nrf24_read_rx_payload
 nrf24_poll_reset:    
-    wdr
     ; reset into bootloader when a programming packet is received
+    wdr
     rcall   nrf24_status
     andi    r24, 0xE
-    cpi	    r24, 0xA ; packet in pipe 5?
-    brne    return
-    ldi	    r24, CPU_CCP_IOREG_gc
+    subi    r24, 0xA - CPU_CCP_IOREG_gc ; CCP value only when packet in pipe 5
     out	    CPU_CCP, r24
     sts	    RSTCTRL_SWRR, r25
+    ret
        
 nrf24_begin:
     ldi	    ZL, lo8(SPI0_base)
@@ -75,6 +80,10 @@ wait_spi:
 return:
     ret  
 
+nrf24_begin_tx:
+    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP)
+    ldi	    r22, 1
+    rjmp    nrf24_begin_rxtx
 nrf24_begin_rx:
     ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP) | _BV(PRIM_RX)
     mov	    r22, r24
@@ -83,7 +92,6 @@ nrf24_begin_rxtx:
     rcall   nrf24_command
 nrf24_set_config_r21:
     mov	    r22, r21
-nrf24_set_config:    
     ldi	    r24, W_REGISTER | CONFIG
 nrf24_command:
     rcall   nrf24_begin
@@ -112,28 +120,23 @@ read_packet:
     brne    read_packet
     movw    r24, X
     rjmp    nrf24_end
-
-crcadjust:
-    ; this value is patched to ensure the CRC of the bootloader is 0xFFFF
-    .byte 0xCC, 0xCC
-    
+        
 radio_registers:
     .byte W_REGISTER | CONFIG, 0 ; power down 
     .byte W_REGISTER | EN_AA, 0x3F ; auto acknowledge on all pipes
     .byte W_REGISTER | SETUP_AW, (ADDRESS_WIDTH - 2)
+    .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
     .byte W_REGISTER | RF_SETUP, SETUP_VALUE ; power & data rate
     .byte W_REGISTER | DYNPD, 0x3F ; dynamic payload on all pipes  
     .byte W_REGISTER | RX_ADDR_P5, 'P' ; programming pipe address
     .byte W_REGISTER | FEATURE, _BV(EN_DPL)|_BV(EN_ACK_PAY)|_BV(EN_DYN_ACK) ; dynamic payloads
-    .byte W_REGISTER | SETUP_RETR, 0x7F ; maximum retries at 4ms
     .byte R_REGISTER | RF_SETUP, 0 ; read back setup register to check radio is present   
     .org 128 ; the code relies on this ending at exactly 0x8080
 radio_registers_end:   
     
-nrf24_begin_tx:
-    ldi     r21, _BV(MASK_RX_DR) | _BV(MASK_TX_DS) | _BV(MASK_MAX_RT) | _BV(CRCO) | _BV(EN_CRC) | _BV(PWR_UP)
-    ldi	    r22, 1
-    rjmp    nrf24_begin_rxtx
+crcadjust:
+    ; this value is patched to ensure the CRC of the bootloader is 0xFFFF
+    .byte 0xCC, 0xCC
     
 nrf24_set_tx_address:
     ldi	    r24, W_REGISTER | TX_ADDR
@@ -154,20 +157,20 @@ nrf24_command_data_x:
 start_bootloader:
     ldi	    YL, lo8(radio_registers + MAPPED_PROGMEM_START)
     ldi	    YH, hi8(radio_registers + MAPPED_PROGMEM_START)
-    ldi	    r20, (radio_registers_end - radio_registers) / 2
 
-start_bootloader_custom_radio_settings:    
-    ; configure pin dirs
-    ldi	    r16, PORTA_DIR_CFG
-    ldi	    r17, PORTB_DIR_CFG
-    out	    VPORTA_DIR, r16
-    out	    VPORTB_DIR, r17
+    ; configure pins
+    ldi	    r16, PORT1_DIR_CFG
+    ldi	    r17, PORT2_DIR_CFG
+    ldi     r18, PORTMUXB_CFG
+    sts     PORTMUX_CTRLB, r18
+    out	    VPORT1_DIR, r16
+    out	    VPORT2_DIR, r17    
    
 init_radio:
     ld	    r24, Y+
     ld	    r22, Y+
     rcall   nrf24_command
-    dec	    r20
+    cpi	    YL, lo8(radio_registers_end)
     brne    init_radio
 
     ; last command in radio_registers reads back the RF_SETUP register.
@@ -213,8 +216,8 @@ write_nvm:
     rcall   nrf24_command_data_x
 wait_for_command:
     ; turn on LED and radio CE
-    out     VPORTA_OUT, r16
-    out	    VPORTB_OUT, r17
+    out     VPORT1_OUT, r16
+    out	    VPORT2_OUT, r17
     ; read next packet to command buffer
     movw    X, Y
 read_page:
@@ -252,7 +255,6 @@ app:
 #ifdef LED_PIN
     sbi	    LED_PORT, LED_PIN
 #endif
-    clr	    r0
     rcall   nrf24_poll_reset
     rjmp    app
  
