@@ -17,7 +17,7 @@ The radio address is stored in the first 3 bytes of the USERROW memory on the MC
 The bootloader always sets up the radio before starting your application.  The radio will be initialised with the programmed address in the TX, RX0 and RX1 pipes and with all feature bits enabled (variable size payloads and ack payloads are required). The bootloader only listens for packets on pipe 5 which is configured with an LSB address of 'P' (so 'P01' by default).  You can easily set up different pipes/channels for your program to use by just reprogramming the first byte of TX/RXn.
 
 # Usage
-The STK500NRF24 sketch should be used on another MCU with an nRF24L01+ in order to transmit programming instructions to the bootloader.  This sketch listens on serial for the STK500 protocol as provided by avrdude or by pystk500 or writestk500.  The baud rate is set to 500k.  When it is not in programming mode the sketch will forward serial data to/from the slave MCU over the air.  
+The ProgrammingBridge sketch should be used on another MCU with an nRF24L01+ in order to transmit programming instructions to the bootloader.  This sketch listens on serial (or TCP on an ESP8266) for the STK500 protocol as provided by avrdude or by writestk500.  The baud rate is set to 500k by default.  When it is not in programming mode the sketch will forward serial data to/from the slave MCU over the air.  
 
 There is also a configuration mode that can be accessed by sending the command \*cfg over the serial link.  When in this mode you can select the address of the radio to program and also reconfigure the connected radio's address.
 
