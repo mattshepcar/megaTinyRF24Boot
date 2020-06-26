@@ -37,9 +37,4 @@ If you want your application to respond to OTA programming requests you should k
 
 # Arduino
 
-If you're using megaTinyCore https://github.com/SpenceKonde/megaTinyCore you can make a copy of the atxy4o config in boards.txt and rename it to atxy4rf and makes these changes:
-
-	atxy4rf.name=ATtiny1614/1604/814/804/414/404/214/204 (nRF24 boot)
-	atxy4rf.upload.speed=500000
-	atxy4rf.compiler.c.elf.extra_flags=-Wl,--defsym,nrf24_status=2 -Wl,--defsym,nrf24_command=4 -Wl,--defsym,nrf24_command_long=6 -Wl,--defsym,nrf24_begin_rx=8 -Wl,--defsym,nrf24_begin_tx=10 -Wl,--defsym,nrf24_read_payload=12 -Wl,--defsym,nrf24_boot_poll=14
-    atxy4rf.build.text_section_start=.text=0x100
+If you're using megaTinyCore https://github.com/SpenceKonde/megaTinyCore you can instead use the nrf24boot branch from here https://github.com/mattshepcar/megaTinyCore (clone into your sketches/hardware folder) and you should get a new "ATtiny1614/1604/814/804/414/404/214/204 (nRF24 boot)" platform.
