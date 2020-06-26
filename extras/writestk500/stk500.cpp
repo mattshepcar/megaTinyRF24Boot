@@ -528,9 +528,29 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
+    if (ip.empty())
+    {
+        if (comport.size() < 3 ||
+            tolower(comport[0]) != 'c' ||
+            tolower(comport[1]) != 'o' ||
+            tolower(comport[2]) != 'm')
+        {
+            ip = comport;
+        }
+    }
+
     Stk500 prog;
 	if (!ip.empty())
 	{
+        if (port.empty())
+        {
+            size_t colon = ip.find(':');
+            if (colon != std::string::npos)
+            {
+                port = ip.substr(colon + 1);
+                ip.resize(colon);
+            }
+        }
 		if (!prog.Open(ip.c_str(), port.c_str()))
 			return 1;
 	}
